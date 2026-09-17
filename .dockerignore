@@ -5,9 +5,17 @@ yarn-error.log*
 pnpm-debug.log*
 
 # 运行时数据（必须用 volume 挂载，不该打进镜像）
-data
-storage
-tmp-assets
+#
+# ⚠️ 这里必须写成 `xxx/*` 而不是裸的 `xxx`。
+# .dockerignore 没有 gitignore 那样的「前导斜杠根锚定」语法：不含 `/` 的模式
+# 一律按 basename 匹配**任意层级**的同名目录。裸写 `storage` 会把
+# `src/services/storage/`（存储驱动）也一起排除掉，构建能成功，但容器启动时
+# `Cannot find module '../services/storage/local'` 直接崩溃。
+# 带上 `/` 后模式按完整相对路径匹配，就只作用于根目录下的卷目录。
+data/*
+storage/*
+tmp-assets/*
+logs/*
 *.db
 *.db-wal
 *.db-shm

@@ -8,16 +8,18 @@
  * 「构建到一半才发现 COPY 的文件不存在」。本脚本把这类问题全部提前到秒级检出，
  * 且完全不依赖 Docker 守护进程 —— CI 的 lint 作业里跑，本地也能直接跑。
  *
- * 校验三件事的一致性：
+ * 校验四件事的一致性：
  *   Dockerfile  ↔  仓库真实文件        （COPY 源存在且未被 .dockerignore 误排除）
  *   Dockerfile  ↔  src/config/index.js （端口、数据目录等运行时契约）
  *   Dockerfile  ↔  docker-compose.yml  （挂载点、安全选项）
+ *   Dockerfile  ↔  版本控制            （待打包文件必须真入库，而不是只躺在本地磁盘上）
  *
  * 用法：node scripts/docker-lint.js
  */
 
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 
@@ -115,6 +117,27 @@ function hasVisibleContent(dirRel) {
     return false;
   };
   return walk(abs(dirRel), dirRel);
+}
+
+/** 收集目录下所有会被 COPY 进镜像的文件（跳过被 .dockerignore 排除的） */
+function collectVisibleFiles(dirRel, acc = []) {
+  for (const e of fs.readdirSync(abs(dirRel), { withFileTypes: true })) {
+    const childRel = `${dirRel}/${e.name}`;
+    if (isIgnored(childRel)) continue;
+    if (e.isDirectory()) collectVisibleFiles(childRel, acc);
+    else acc.push(childRel);
+  }
+  return acc;
+}
+
+/** 收集目录下所有层级的子目录名，用于发现 .dockerignore 规则的误伤 */
+function collectDirNames(dirRel, acc = new Set()) {
+  for (const e of fs.readdirSync(abs(dirRel), { withFileTypes: true })) {
+    if (!e.isDirectory()) continue;
+    acc.add(e.name);
+    collectDirNames(`${dirRel}/${e.name}`, acc);
+  }
+  return acc;
 }
 
 /* ===================== 2. 解析 Dockerfile ===================== */
@@ -219,6 +242,86 @@ check('README.md 存在（镜像内与 /api-docs 的数据源）', exists('READM
 check('docs/API.md 存在（/api-docs 页面数据源）', exists('docs/API.md'));
 check('CI 工作流存在', exists('.github/workflows/ci.yml'));
 check('CI 容器级验证脚本存在', exists('scripts/ci-container-check.sh'));
+
+console.log('\n【5】会被打进镜像的文件必须真的能拿到');
+
+/**
+ * 这一组检查的由来是一个真实踩过的坑：
+ *
+ *   .gitignore 里裸写 `storage/`（没有前导斜杠）时，Git 会匹配**任意层级**的同名目录，
+ *   于是 `src/services/storage/`（存储驱动三个文件）被静默吞掉。
+ *   本地因为有文件、怎么跑都正常，但推送后新克隆与 CI 里这些文件根本不存在，
+ *   服务启动即 `Cannot find module '../services/storage/local'`。
+ *   .dockerignore 的裸写 `storage` 会造成完全一样的后果（镜像里缺文件）。
+ *
+ * 两类问题都只能在「提交/构建之前」静态检出 —— 因为判据不是磁盘，而是版本控制与
+ * 忽略规则本身。因此这里做两件事：核对每个待打包文件是否已被 git 跟踪，
+ * 以及扫描忽略规则是否误伤了 COPY 源内的同名目录。
+ */
+
+// 5a. COPY 源里每个文件都必须已被 git 跟踪
+let tracked = null;
+try {
+  tracked = new Set(execSync('git ls-files', { encoding: 'utf8' }).split('\n').filter(Boolean));
+} catch (_) {
+  /* 不在 git 仓库中（例如下载的源码包），跳过这一组 */
+}
+
+if (!tracked) {
+  console.log('  \x1b[33m—\x1b[0m 当前目录不是 git 仓库，跳过「文件已入库」检查');
+} else {
+  const untracked = [];
+  for (const src of contextCopies) {
+    for (const m of resolveSource(src)) {
+      const files = fs.statSync(abs(m)).isDirectory() ? collectVisibleFiles(m) : [m];
+      for (const f of files) if (!tracked.has(f)) untracked.push(f);
+    }
+  }
+  if (untracked.length) {
+    fail(
+      '待打包文件均已纳入版本控制',
+      `${untracked.length} 个文件被忽略规则吞掉，克隆后不存在：${untracked.join(', ')}`,
+    );
+    for (const f of untracked) {
+      let why = '';
+      try {
+        why = execSync(`git check-ignore -v "${f}"`, { encoding: 'utf8' }).trim();
+      } catch (_) {
+        /* 未被忽略却未跟踪，说明只是没 git add */
+      }
+      console.log(`       ${f}  ← ${why || '未执行 git add'}`);
+    }
+    console.log('       \x1b[90m提示：.gitignore 里的目录规则要加前导斜杠做根锚定（如 /storage/），\n' +
+      '             否则会匹配任意层级的同名目录\x1b[0m');
+  } else {
+    ok('待打包文件均已纳入版本控制', `${tracked.size} 个文件`);
+  }
+}
+
+// 5b. 忽略规则不得误伤 COPY 源内的同名目录
+const sourceDirNames = new Set();
+for (const src of contextCopies) {
+  for (const m of resolveSource(src)) {
+    if (fs.statSync(abs(m)).isDirectory()) {
+      sourceDirNames.add(path.basename(m));
+      for (const n of collectDirNames(m)) sourceDirNames.add(n);
+    }
+  }
+}
+const collisions = [];
+for (const r of ignoreRules) {
+  if (r.negate || r.hasSlash) continue; // 带斜杠的规则按完整路径匹配，不存在误伤
+  for (const name of sourceDirNames) {
+    if (r.re.test(name)) collisions.push(`${r.pat} → 会排除 ${name}/`);
+  }
+}
+check(
+  '.dockerignore 的无斜杠规则未误伤 COPY 源内的目录',
+  collisions.length === 0,
+  collisions.length
+    ? `${collisions.join('；')}（应改写为带 / 的模式，如 storage/*）`
+    : `已比对 ${sourceDirNames.size} 个目录名`,
+);
 
 console.log('');
 if (failures.length) {

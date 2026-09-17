@@ -5,9 +5,16 @@ yarn-error.log*
 pnpm-debug.log*
 
 # 运行时数据（含 SQLite、会话密钥、图片）—— 绝不入库
-data/
-storage/
-tmp-assets/
+#
+# ⚠️ 必须带前导斜杠做「根锚定」。不带斜杠的 `storage/` 会匹配**任意层级**的同名
+# 目录，把 `src/services/storage/`（存储驱动）一并吞掉 —— 本地因为有文件、怎么跑
+# 都正常，但推送后新克隆与 CI 里这三个文件根本不存在，服务启动即报
+# `Cannot find module '../services/storage/local'`。
+# 同一个坑对 data/ 与 logs/ 同样成立，因此这里全部改为锚定根目录。
+/data/
+/storage/
+/tmp-assets/
+/logs/
 *.db
 *.db-wal
 *.db-shm
@@ -19,7 +26,6 @@ tmp-assets/
 
 # 日志与临时文件
 *.log
-logs/
 *.tmp
 *.swp
 *~
@@ -31,7 +37,7 @@ logs/
 Thumbs.db
 
 # 构建与覆盖率
-dist/
-build/
-coverage/
-.nyc_output/
+/dist/
+/build/
+/coverage/
+/nyc_output/

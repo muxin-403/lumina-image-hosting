@@ -129,7 +129,7 @@ image-hosting/
 │
 ├── .github/workflows/ci.yml     CI：静态校验 → 测试套件 → 多架构镜像构建 → 容器级验证
 ├── scripts/
-│   ├── docker-lint.js           Docker 构建前静态校验（38 项，无需 Docker 守护进程）
+│   ├── docker-lint.js           Docker 构建前静态校验（40 项，无需 Docker 守护进程）
 │   └── ci-container-check.sh    容器级验证：把镜像跑起来断言架构、用户、健康检查
 │
 ├── src/
@@ -498,7 +498,7 @@ curl -X PATCH http://localhost:3000/api/settings -H "Authorization: Bearer $TOKE
 ### 7.4 其他检查
 
 - 全部 32 个 JS 文件通过 `node --check` 语法校验
-- `scripts/docker-lint.js` 38 项 Docker 构建前静态校验全部通过：
+- `scripts/docker-lint.js` 40 项 Docker 构建前静态校验全部通过：
   Dockerfile 的每个 `COPY` 源都真实存在且未被 `.dockerignore` 误排除、
   入口文件真实且在镜像内、`EXPOSE`/`ENV PORT` 与 `src/config/index.js` 默认值一致、
   `HEALTHCHECK` 探测的路由真实存在、compose 挂载点与 `DATA_DIR`/`STORAGE_DIR` 对齐、
@@ -511,6 +511,8 @@ curl -X PATCH http://localhost:3000/api/settings -H "Authorization: Bearer $TOKE
   实测上传 / 列表 / 统计 / 改配置均正常
 - `.dockerignore` 与 `Dockerfile` 交叉核对：`data/`、`storage/`、`.env`、
   `.github/` 均不会被误打进镜像，`README.md` 与 `docs/*.md` 的 `!` 例外生效
+- 每个会被打进镜像的文件都已纳入版本控制（防止 `.gitignore` 静默吞掉源码，
+  判据是 `git ls-files` 而不是磁盘 —— 见 7.5 第 6 条）
 
 ### 7.5 测试过程中发现并修复的真实缺陷
 
@@ -525,6 +527,17 @@ curl -X PATCH http://localhost:3000/api/settings -H "Authorization: Bearer $TOKE
    首次写入失败（自建网盘不会自动建目录）。
 5. **游客限额的热更新未被真正验证**：初版测试用的是比限额更小的文件，
    断言形同虚设；改为把限额压到 1KB 后才真正覆盖到这条路径。
+6. **`.gitignore` / `.dockerignore` 无斜杠目录规则吞掉源码**（提交前由 CI 暴露）：
+   两条忽略规则都裸写了 `storage`，而 `storage` 这类不含 `/` 的模式会匹配
+   **任意层级**的同名目录 —— 于是 `src/services/storage/` 下的存储驱动三个文件
+   （`index.js` / `local.js` / `webdav.js`）被静默排除。本地因为有文件、怎么跑都正常，
+   但推送后 CI 检出与任何新克隆里这些文件根本不存在，服务启动即
+   `Cannot find module '../services/storage/local'`。
+   修复：`.gitignore` 改为根锚定 `/storage/`（`data/`、`logs/` 同理）；
+   `.dockerignore` 没有根锚定语法，改为带斜杠的 `storage/*` 只作用于根目录。
+   同时在 `scripts/docker-lint.js` 增加两条检查 —— 核对每个待打包文件
+   `git ls-files` 是否跟踪、以及无斜杠忽略规则是否误伤 COPY 源内的同名目录，
+   让这类问题在提交前就暴露，而不是等 CI 跑到一半。
 
 ### 7.6 持续集成与多架构镜像
 
@@ -534,7 +547,7 @@ curl -X PATCH http://localhost:3000/api/settings -H "Authorization: Bearer $TOKE
 
 | 作业 | 内容 | 触发条件 |
 | --- | --- | --- |
-| `lint` | 32 个 JS 文件的 `node --check` + `scripts/docker-lint.js` 38 项构建前校验 | 全部 |
+| `lint` | 32 个 JS 文件的 `node --check` + `scripts/docker-lint.js` 40 项构建前校验 | 全部 |
 | `test` | 冷启动自举 → 三套测试共 142 项断言（Node 22 与 24 双版本矩阵） | 全部 |
 | `docker` | 构建多架构镜像并推送 GHCR | 全部（PR 仅构建 amd64 且不推送） |
 | `verify` | 校验清单含 amd64 + arm64，并分别把两个架构的容器跑起来 | 非 PR |

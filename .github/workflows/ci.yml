@@ -7,7 +7,7 @@
 #
 #   1. lint   秒级静态门禁
 #             · 全量 JS 语法检查（node --check）
-#             · scripts/docker-lint.js：38 项构建前校验，能在多架构构建开始前
+#             · scripts/docker-lint.js：40 项构建前校验，能在多架构构建开始前
 #               拦住「COPY failed: file not found」这类最常见、也最浪费时间的失败
 #
 #   2. test   把应用真正跑起来，验证运行时契约
@@ -103,7 +103,9 @@ jobs:
       - name: Docker 构建前静态校验
         # 校验 Dockerfile 的 COPY 源是否存在且未被 .dockerignore 误排除、入口文件
         # 是否真实、端口与 src/config/index.js 是否一致、HEALTHCHECK 路由是否存在、
-        # compose 挂载点是否与 DATA_DIR/STORAGE_DIR 对齐……全部无需 Docker 守护进程。
+        # compose 挂载点是否与 DATA_DIR/STORAGE_DIR 对齐，以及**每个待打包文件是否
+        # 真的已被 git 跟踪**（只躺在本地磁盘、被 .gitignore 静默吞掉的文件，在 CI
+        # 检出与任何新克隆里都不存在）。全部无需 Docker 守护进程。
         # 这些检查单条都微不足道，但任何一条失守都会让后面的构建白跑十几分钟。
         run: node scripts/docker-lint.js
 
