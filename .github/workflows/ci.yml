@@ -1,0 +1,411 @@
+# =============================================================================
+# Lumina 图床 · 持续集成 / 多架构镜像构建
+# =============================================================================
+# 本项目没有任何编译步骤（零前端构建、源码即产物），所谓「构建」的实质就是
+# **构建并验证 Docker 镜像**。流水线据此刻意分成三级，由快到慢，前一级失败就
+# 不浪费后一级的时间：
+#
+#   1. lint   秒级静态门禁
+#             · 全量 JS 语法检查（node --check）
+#             · scripts/docker-lint.js：38 项构建前校验，能在多架构构建开始前
+#               拦住「COPY failed: file not found」这类最常见、也最浪费时间的失败
+#
+#   2. test   把应用真正跑起来，验证运行时契约
+#             冷启动自举 → 生成测试素材 → 端到端接口 / WebDAV 驱动 / 前端运行时
+#             三套测试共 142 项断言。全程离线（WebDAV 用进程内的模拟服务端），
+#             CI 不会因为外部站点抖动而变红。
+#
+#   3. docker 构建多架构镜像并推送到 GHCR
+#             linux/amd64 + linux/arm64 一次构建出多架构清单
+#
+#   4. verify 容器级验证：把镜像真跑起来
+#             多架构最容易出的问题是「构建成功但目标架构跑不起来」—— 本项目依赖
+#             better-sqlite3 与 sharp 两个原生模块，架构装错就是启动即崩。
+#             因此不仅校验清单里确实有两个架构，还分别用 QEMU 跑起 amd64 与
+#             arm64 容器，断言服务能完成启动并响应。
+#
+# 触发与产出：
+#   push main         → 校验 + 测试 + 构建两个架构 + 推送 :main / :latest / :sha-xxxxxxx
+#   pull_request      → 校验 + 测试 + 仅构建 amd64（不推送，避免任何人开 PR
+#                        就能往仓库的包注册表塞镜像），并用本地镜像做容器级验证
+#   tag v*            → 校验 + 测试 + 构建两个架构 + 推送 :1.2.3 / :1.2 / :sha-xxxxxxx
+#   workflow_dispatch → 手动触发，行为同 push main
+#
+# 镜像可见性：从**公开**仓库推送的 GHCR 包会继承公开可见性，可匿名 pull。
+# 若日后把仓库改为私有，包会随之变私有；如需继续公开，得在仓库页面 →
+# Packages → 选中镜像 → Package settings → Change visibility 手动改，
+# 这一步只能在网页操作（GITHUB_TOKEN 无权修改包可见性）。
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支/PR 的连续推送只保留最新一轮，既省额度，也避免旧的失败结果覆盖新结论
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# 默认最小权限，需要写包注册表的作业单独提权
+permissions:
+  contents: read
+
+env:
+  # 与 Dockerfile 里 FROM 的 node:22-bookworm-slim 保持同一大版本。
+  # 让 lint / test 跑在与镜像一致的运行时上，避免「CI 通过、容器里跑不起来」。
+  NODE_VERSION: '22'
+
+jobs:
+  # ===========================================================================
+  # 1. 静态校验：不启动任何服务，秒级完成，性价比最高的门禁
+  # ===========================================================================
+  lint:
+    name: 静态校验
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
+      - name: 安装 Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: JS 语法检查
+        run: |
+          set -euo pipefail
+          # 自动发现所有 JS 文件：新增文件无需改动本步骤
+          mapfile -t files < <(find src public examples scripts \
+            -type f -name '*.js' -not -path './node_modules/*' | sort)
+          echo "待检查文件：${#files[@]} 个"
+          failed=0
+          for f in "${files[@]}"; do
+            if node --check "$f" 2>/dev/null; then
+              echo "  ok   $f"
+            else
+              echo "  FAIL $f"
+              node --check "$f" 2>&1 | head -5 || true
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::存在语法错误的文件，详见上方 FAIL 行"
+            exit 1
+          fi
+          echo "全部 ${#files[@]} 个文件语法检查通过"
+
+      - name: Docker 构建前静态校验
+        # 校验 Dockerfile 的 COPY 源是否存在且未被 .dockerignore 误排除、入口文件
+        # 是否真实、端口与 src/config/index.js 是否一致、HEALTHCHECK 路由是否存在、
+        # compose 挂载点是否与 DATA_DIR/STORAGE_DIR 对齐……全部无需 Docker 守护进程。
+        # 这些检查单条都微不足道，但任何一条失守都会让后面的构建白跑十几分钟。
+        run: node scripts/docker-lint.js
+
+  # ===========================================================================
+  # 2. 测试套件：冷启动 → 跑三套离线测试（142 项断言）
+  # ===========================================================================
+  test:
+    name: 测试套件 (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node:
+          # 22 = Dockerfile 钉死的运行版本（必须过）
+          # 24 = 当前最新 LTS（防止后续升级基础镜像时才发现不兼容）
+          - '22'
+          - '24'
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
+      - name: 安装 Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: 安装依赖
+        # 必须带上 devDependencies：前端运行时测试（examples/ui-check.js）依赖 jsdom。
+        # 不用 --omit=dev，也不要在这里设 NODE_ENV=production，否则 npm 会跳过 devDeps。
+        run: npm ci --no-audit --no-fund
+
+      - name: 冷启动图床服务
+        # 不传任何 DATA_DIR / STORAGE_DIR，走 config 默认的仓库内 data/ 与 storage/，
+        # 顺带验证「全新克隆首启能自举」：自动建目录、建库、生成 .session 密钥、
+        # 用 ADMIN_PASSWORD 初始化管理员密码。
+        env:
+          ADMIN_PASSWORD: admin123
+          NODE_ENV: production
+        run: |
+          set -euo pipefail
+          nohup node src/server.js > /tmp/lumina-server.log 2>&1 &
+          for i in $(seq 1 45); do
+            if curl -fsS -o /dev/null http://127.0.0.1:3000/api/health; then
+              echo "服务已在 ${i}s 内就绪"
+              cat /tmp/lumina-server.log
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::服务未能在 45s 内响应 /api/health"
+          cat /tmp/lumina-server.log
+          exit 1
+
+      - name: 生成测试素材
+        run: node examples/make-test-assets.js
+
+      - name: 运行测试套件
+        env:
+          BASE: http://127.0.0.1:3000
+          ADMIN_PASSWORD: admin123
+        run: |
+          set -uo pipefail
+          rc=0
+          run() { # run <脚本> <中文名>
+            echo ""
+            echo "───────── $2（$1）─────────"
+            if ! node "examples/$1"; then
+              echo "::error::$2 存在失败断言"
+              rc=1
+            fi
+          }
+          run smoke-test.js "端到端接口"
+          run webdav-test.js "WebDAV 存储驱动"
+          run ui-check.js   "前端运行时"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::测试套件未全部通过"
+          fi
+          exit $rc
+
+      - name: 失败时输出服务端日志
+        if: failure()
+        run: tail -n 200 /tmp/lumina-server.log || true
+
+  # ===========================================================================
+  # 3. 构建镜像：一次构建产出 linux/amd64 与 linux/arm64，推送到 GHCR
+  # ===========================================================================
+  docker:
+    name: 构建多架构镜像 (amd64 + arm64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [lint, test]
+    outputs:
+      primary_tag: ${{ steps.primary.outputs.tag }}
+      digest: ${{ steps.build.outputs.digest }}
+      platforms: ${{ steps.platforms.outputs.list }}
+    permissions:
+      contents: read
+      packages: write # 推送镜像到 GHCR 必需
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
+      - name: 设定目标平台
+        id: platforms
+        run: |
+          set -euo pipefail
+          # PR 只构建宿主架构：fork 的 PR 拿不到写权限、本来也不推送，
+          # 白白花十几分钟跑 QEMU 模拟没有收益；且单平台才能用 load 把镜像
+          # 灌进本地守护进程做容器级验证。
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            LIST="linux/amd64"
+          else
+            LIST="linux/amd64,linux/arm64"
+          fi
+          echo "list=$LIST" >> "$GITHUB_OUTPUT"
+          echo "本次目标平台：$LIST"
+
+      - name: 配置 QEMU
+        # arm64 构建需要 binfmt 注册，让 x86 宿主能执行 arm64 指令。
+        # 这一步同样是后面 verify 作业能直接跑起 arm64 容器的前提。
+        uses: docker/setup-qemu-action@v4
+
+      - name: 配置 Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 GHCR
+        # PR 来自 fork 时只读令牌无法推送，且我们本来也不推 PR 镜像，直接跳过
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 计算镜像标签与 OCI 标签
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          # github.repository 会被自动转成小写（GHCR 要求仓库名全小写）
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: 构建镜像
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ steps.platforms.outputs.list }}
+          # PR：不推送，把镜像加载进本地守护进程供下一步做容器级验证
+          # 其它：推送到 GHCR（注意 push 与 load 互斥，用事件类型二选一；
+          #       多平台清单也无法 load 进本地守护进程）
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 跨运行复用构建层，第二次起构建基本是秒级
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # 关闭 provenance 证明附件：保持成干净的镜像清单，避免在较老的
+          # Docker 客户端 / compose 上 pull 到 attestation 清单而报错
+          provenance: false
+
+      - name: 解析用于验证的主标签
+        id: primary
+        run: |
+          set -euo pipefail
+          # metadata 会输出多个标签（每行一个），取第一个用于验证
+          TAG=$(printf '%s\n' "${{ steps.meta.outputs.tags }}" | head -n1)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "验证对象：$TAG"
+
+      - name: 容器级验证（AMD64 · 本地镜像）
+        # PR 才有本地镜像可跑；非 PR 的镜像在 verify 作业里拉回来验证
+        if: github.event_name == 'pull_request'
+        run: bash scripts/ci-container-check.sh "${{ steps.primary.outputs.tag }}" linux/amd64 amd64 3100
+
+      - name: 写入构建摘要
+        if: always()
+        run: |
+          set -euo pipefail
+          DIGEST="${{ steps.build.outputs.digest }}"
+          {
+            echo "## 镜像构建结果"
+            echo
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 事件 | \`${{ github.event_name }}\` |"
+            echo "| 目标平台 | \`${{ steps.platforms.outputs.list }}\` |"
+            echo "| Digest | \`${DIGEST:-PR 未推送}\` |"
+            echo
+            echo "镜像标签："
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo "> PR 构建：**未推送**到 GHCR，仅构建 amd64 并用本地镜像完成容器级验证。"
+            else
+              echo "> 已推送到 GHCR：\`ghcr.io/${{ github.repository }}\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # 4. 双架构容器级验证：确认清单里真的有 amd64 与 arm64，且都跑得起来
+  # ===========================================================================
+  verify:
+    name: 容器级验证 (amd64 + arm64)
+    needs: [docker]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 检出代码（取用验证脚本）
+        uses: actions/checkout@v7
+
+      - name: 配置 QEMU
+        # 直接以 arm64 运行容器需要 binfmt，否则会报 exec format error
+        uses: docker/setup-qemu-action@v4
+
+      - name: 配置 Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 校验多架构清单
+        # 这是本流水线的核心交付契约：镜像必须同时提供 linux/amd64 与 linux/arm64。
+        # 少一个架构就意味着有一类机器根本拉不起来，必须在合并前拦住。
+        env:
+          IMG: ${{ needs.docker.outputs.primary_tag }}
+        run: |
+          set -uo pipefail
+          echo "镜像：$IMG"
+          OUT=$(docker buildx imagetools inspect "$IMG" 2>/dev/null)
+          printf '%s\n' "$OUT"
+
+          fails=0
+          for arch in amd64 arm64; do
+            if printf '%s' "$OUT" | grep -q "Platform:.*linux/$arch"; then
+              echo "  ✓ 清单包含 linux/$arch"
+            else
+              echo "  ✗ 清单缺少 linux/$arch"
+              fails=$((fails + 1))
+            fi
+          done
+
+          # 只允许出现这两个架构，多余架构说明构建参数被意外放开
+          count=$(printf '%s' "$OUT" | grep -c 'Platform:')
+          echo "  清单中的平台条目数：$count"
+          if [ "$fails" -ne 0 ]; then
+            echo "::error::多架构清单校验失败 ${fails} 项"
+            exit 1
+          fi
+          echo "多架构清单校验通过"
+
+      - name: 容器级验证（AMD64）
+        env:
+          IMG: ${{ needs.docker.outputs.primary_tag }}
+        run: bash scripts/ci-container-check.sh "$IMG" linux/amd64 amd64 3100 --pull
+
+      - name: 容器级验证（ARM64 · QEMU）
+        # 本项目的原生依赖是主要风险点：better-sqlite3 在 DB 初始化时加载、
+        # sharp 在 services/image.js 顶层 require，任一在 arm64 上找不到对应
+        # 预编译产物，进程都会在启动阶段直接崩溃。能响应 /api/health 即证明二者可用。
+        env:
+          IMG: ${{ needs.docker.outputs.primary_tag }}
+        run: bash scripts/ci-container-check.sh "$IMG" linux/arm64 arm64 3200 --pull
+
+      - name: 写入验证摘要
+        if: always()
+        env:
+          IMG: ${{ needs.docker.outputs.primary_tag }}
+          DIGEST: ${{ needs.docker.outputs.digest }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## 容器级验证结果"
+            echo
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 镜像 | \`$IMG\` |"
+            echo "| Digest | \`$DIGEST\` |"
+            echo "| 平台 | \`linux/amd64\` · \`linux/arm64\` |"
+            echo
+            echo "两个架构均通过：多架构清单完整性、真实指令集、页面与接口可用性、"
+            echo "非 root(uid 1001) 运行、HEALTHCHECK 探测、数据目录可写、优雅退出。"
+            echo
+            echo "拉取方式："
+            echo
+            echo '```bash'
+            echo "docker pull $IMG"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

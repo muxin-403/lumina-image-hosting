@@ -1,0 +1,74 @@
+# ==========================================================================
+# Lumina 图床 · Docker Compose 部署编排
+# 启动：docker compose up -d
+# 访问：http://localhost:3000   （管理台 /admin）
+# ==========================================================================
+
+services:
+  lumina:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: lumina-image-hosting:1.0.0
+    container_name: lumina
+    restart: unless-stopped
+
+    ports:
+      # 只需对外暴露 127.0.0.1 时改为 "127.0.0.1:3000:3000"，由宿主 Nginx 反代
+      - "3000:3000"
+
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "3000"
+      DATA_DIR: /app/data
+      STORAGE_DIR: /app/storage
+      # 反代场景下建议在 .env 里配置为真实域名，例如：
+      # PUBLIC_BASE_URL: https://img.example.com
+      # TRUST_PROXY: "true"
+
+    volumes:
+      # SQLite 数据库 + 会话密钥（务必持久化，否则重启后 Token 全部失效）
+      - ./data:/app/data
+      # 图片与缩略图（local / hybrid 驱动必需）
+      - ./storage:/app/storage
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    # 上传大图需要一定的临时空间与文件句柄
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    security_opt:
+      - no-new-privileges:true
+
+# 如需搭配反向代理，可取消下面的注释，并自行补充 nginx 配置
+#
+#   nginx:
+#     image: nginx:alpine
+#     restart: unless-stopped
+#     ports:
+#       - "80:80"
+#       - "443:443"
+#     volumes:
+#       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+#       - ./certs:/etc/nginx/certs:ro
+#     depends_on:
+#       - lumina
+
+volumes: {}

@@ -1,0 +1,39 @@
+{
+  "name": "lumina-image-hosting",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Lumina —— 轻量级自托管图床：本地存储 / WebDAV 双驱动，支持 API 程序化上传与管理",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "assets": "node examples/make-test-assets.js",
+    "pretest": "node examples/make-test-assets.js",
+    "test": "node examples/smoke-test.js && node examples/webdav-test.js && node examples/ui-check.js",
+    "test:api": "node examples/smoke-test.js",
+    "test:webdav": "node examples/webdav-test.js",
+    "test:ui": "node examples/ui-check.js"
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "keywords": [
+    "image-hosting",
+    "imagebed",
+    "webdav",
+    "express",
+    "sqlite",
+    "sharp"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "multer": "^2.0.1",
+    "sharp": "^0.34.2"
+  },
+  "devDependencies": {
+    "jsdom": "^26.0.0"
+  }
+}

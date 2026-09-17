@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Lumina 图床 · 拖拽即上传</title>
+  <meta name="description" content="轻量级自托管图床：支持拖拽 / 批量 / 剪贴板粘贴上传，自动生成直链、HTML、Markdown、BBCode 引用，支持本地与 WebDAV 存储。" />
+  <meta name="theme-color" content="#2f6feb" />
+  <meta property="og:title" content="Lumina 图床" />
+  <meta property="og:description" content="拖进来就上传，一键拿到多种格式的图片直链。" />
+  <meta property="og:type" content="website" />
+  <link rel="icon" href="/favicon.svg" />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主内容</a>
+
+  <header class="topbar">
+    <a class="brand" href="/">
+      <svg class="logo" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+        <rect x="2" y="2" width="28" height="28" rx="8" fill="#2f6feb" />
+        <circle cx="16" cy="15" r="6.5" stroke="#fff" stroke-width="2" />
+        <path d="M11 24l3.4-4.2 2.4 2.6 2.6-3.2L23 24" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
+      <span id="brand-name">Lumina 图床</span>
+      <small>自托管 · 无框架</small>
+    </a>
+    <nav class="topnav">
+      <a href="/" class="active">上传</a>
+      <a href="/admin">管理台</a>
+      <a href="/api-docs" target="_blank" rel="noopener">API 文档</a>
+    </nav>
+  </header>
+
+  <main id="main" class="wrap">
+    <section class="hero">
+      <h1>拖进来，就上传</h1>
+      <p>拖拽文件、批量选择，或直接 <kbd>Ctrl</kbd>+<kbd>V</kbd> 粘贴截图 —— 立即拿到多种格式的图片直链</p>
+    </section>
+
+    <section class="card" aria-label="上传区">
+      <div class="dropzone" id="dropzone" role="button" tabindex="0"
+           aria-label="点击选择文件，或将图片拖拽到此处，也可使用 Ctrl+V 粘贴">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <path d="M17 8l-5-5-5 5" /><path d="M12 3v12" />
+        </svg>
+        <div>
+          <div class="dz-title">把图片拖到这里</div>
+          <div class="dz-sub">或点击选择文件 · 支持 <strong>Ctrl / ⌘ + V</strong> 直接粘贴剪贴板图片</div>
+        </div>
+        <div class="dz-formats" id="formats-hint">JPG · JPEG · PNG · GIF · WebP · SVG · AVIF</div>
+        <input type="file" id="file-input" multiple accept="image/*" aria-hidden="true" tabindex="-1" />
+      </div>
+
+      <div class="options">
+        <label title="上传前在浏览器内把 JPG/PNG 转成 WebP，显著减小体积，服务端零开销">
+          <input type="checkbox" id="opt-webp" checked />
+          客户端转 WebP
+        </label>
+        <label title="WebP 有损质量，越高越清晰、体积越大">
+          质量
+          <input type="range" id="opt-quality" min="40" max="100" step="1" value="82" />
+          <span class="val" id="opt-quality-val">82</span>
+        </label>
+        <label>
+          <input type="checkbox" id="opt-autocopy" />
+          上传后自动复制直链
+        </label>
+        <span class="spacer"></span>
+        <span class="hint" id="limit-hint">加载配置中…</span>
+      </div>
+
+      <div class="progress" id="progress" hidden>
+        <div class="bar"><i id="progress-bar"></i></div>
+        <span class="txt" id="progress-text">0%</span>
+      </div>
+    </section>
+
+    <section id="results-section" hidden>
+      <div class="results-head">
+        <h2>上传结果 <span class="badge info" id="result-count">0</span></h2>
+        <div class="actions">
+          <button class="btn sm" type="button" id="copy-all-url">复制全部直链</button>
+          <button class="btn sm" type="button" id="copy-all-md">复制全部 Markdown</button>
+          <button class="btn sm" type="button" id="download-urls">导出列表</button>
+          <button class="btn sm ghost" type="button" id="clear-results">清空</button>
+        </div>
+      </div>
+      <div class="result-list" id="result-list"></div>
+    </section>
+
+    <section id="empty-tip" class="card" style="margin-top:30px">
+      <div class="empty">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+          <rect x="3" y="3" width="18" height="18" rx="3" /><circle cx="8.5" cy="9" r="1.8" />
+          <path d="M21 16l-5.5-5.5L5 21" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        <p>还没有上传记录，拖一张图片进来试试</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    Lumina 图床 · 由 <code>Node.js + Express + SQLite + Sharp</code> 驱动 · 前端零框架
+  </footer>
+
+  <script src="/js/common.js"></script>
+  <script src="/js/home.js"></script>
+</body>
+</html>

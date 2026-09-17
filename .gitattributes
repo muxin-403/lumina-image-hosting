@@ -1,0 +1,42 @@
+# ==========================================================================
+# 统一使用 LF 行尾
+# --------------------------------------------------------------------------
+# 本项目的运行环境是 Linux（Docker 容器 + GitHub Actions ubuntu runner）。
+# 在 Windows 上编辑时，编辑器默认写入 CRLF，会导致：
+#   · shell 脚本报 $'\r': command not found
+#   · Dockerfile 的 \ 续行把 \r 带进实际执行的命令
+# 两者都是「本地看着正常、CI 一跑就挂」的隐蔽问题，因此在版本控制层锁死。
+# ==========================================================================
+
+# 默认：文本文件由 git 自动识别，检出与入库统一为 LF
+* text=auto eol=lf
+
+# 显式声明，避免自动识别在某些环境下失灵
+*.js        text eol=lf
+*.mjs       text eol=lf
+*.json      text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.md        text eol=lf
+*.sh        text eol=lf
+*.py        text eol=lf
+*.html      text eol=lf
+*.css       text eol=lf
+*.svg       text eol=lf
+Dockerfile  text eol=lf
+.gitignore  text eol=lf
+.dockerignore text eol=lf
+.npmrc      text eol=lf
+
+# 二进制文件不做任何行尾转换
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.webp      binary
+*.avif      binary
+*.ico       binary
+*.woff      binary
+*.woff2     binary
+*.db        binary
+*.node      binary

@@ -1,0 +1,38 @@
+# 依赖与构建产物
+node_modules
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 运行时数据（必须用 volume 挂载，不该打进镜像）
+data
+storage
+tmp-assets
+*.db
+*.db-wal
+*.db-shm
+
+# 本地配置与密钥
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# 版本控制与编辑器
+.git
+.gitignore
+.github
+.vscode
+.idea
+*.swp
+
+# 文档与杂项（容器内只需要 README 与 docs/*.md，后者是 /api-docs 页面的数据源）
+*.md
+!README.md
+!docs/*.md
+LICENSE
+.DS_Store
+Thumbs.db
+coverage
+.nyc_output

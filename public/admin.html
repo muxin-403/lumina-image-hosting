@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>管理台 · Lumina 图床</title>
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="theme-color" content="#2f6feb" />
+  <link rel="icon" href="/favicon.svg" />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主内容</a>
+
+  <header class="topbar">
+    <a class="brand" href="/">
+      <svg class="logo" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+        <rect x="2" y="2" width="28" height="28" rx="8" fill="#2f6feb" />
+        <circle cx="16" cy="15" r="6.5" stroke="#fff" stroke-width="2" />
+        <path d="M11 24l3.4-4.2 2.4 2.6 2.6-3.2L23 24" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
+      <span id="brand-name">Lumina 图床</span>
+      <small>管理台</small>
+    </a>
+    <nav class="topnav">
+      <a href="/">上传</a>
+      <a href="/admin" class="active">管理台</a>
+      <a href="/api-docs" target="_blank" rel="noopener">API 文档</a>
+      <button class="btn-link" type="button" id="logout-btn" hidden>退出登录</button>
+    </nav>
+  </header>
+
+  <main id="main" class="wrap wide">
+    <!-- ============================ 登录 ============================ -->
+    <section id="login-view" class="card login-shell" hidden>
+      <h1>管理台登录</h1>
+      <p class="sub">仅设单一管理员账号</p>
+      <div id="login-alert"></div>
+      <form id="login-form" autocomplete="on">
+        <div class="field">
+          <label for="password">管理员密码</label>
+          <input type="password" id="password" name="password" autocomplete="current-password"
+                 placeholder="请输入管理员密码" required />
+        </div>
+        <button class="btn primary" type="submit" id="login-btn">登录</button>
+      </form>
+    </section>
+
+    <!-- ============================ 控制台 ============================ -->
+    <section id="dash-view" hidden>
+      <div id="dash-alert"></div>
+
+      <div class="stats" id="stats"></div>
+
+      <nav class="tabs-nav" role="tablist" aria-label="管理台分区">
+        <button type="button" role="tab" data-tab="images" class="active" aria-selected="true">图片管理</button>
+        <button type="button" role="tab" data-tab="settings" aria-selected="false">站点设置</button>
+        <button type="button" role="tab" data-tab="storage" aria-selected="false">存储与安全</button>
+      </nav>
+
+      <!-- ---------------------- 图片管理 ---------------------- -->
+      <div id="tab-images">
+        <div class="card section">
+          <div class="toolbar">
+            <div class="grow">
+              <input type="search" id="search-input" placeholder="搜索文件名 / ID / 存储路径…" aria-label="搜索图片" />
+            </div>
+            <select id="filter-uploader" aria-label="按上传者筛选">
+              <option value="">全部来源</option>
+              <option value="admin">管理员上传</option>
+              <option value="guest">游客上传</option>
+            </select>
+            <select id="filter-ext" aria-label="按格式筛选">
+              <option value="">全部格式</option>
+            </select>
+            <select id="filter-order" aria-label="排序方式">
+              <option value="newest">最新优先</option>
+              <option value="oldest">最早优先</option>
+              <option value="largest">体积从大到小</option>
+              <option value="smallest">体积从小到大</option>
+            </select>
+            <select id="filter-limit" aria-label="每页数量">
+              <option value="24">24 / 页</option>
+              <option value="48">48 / 页</option>
+              <option value="96">96 / 页</option>
+            </select>
+            <button class="btn sm" type="button" id="refresh-btn">刷新</button>
+          </div>
+
+          <div class="toolbar" id="batch-bar" hidden>
+            <span class="badge info" id="selected-count">已选 0 张</span>
+            <button class="btn sm" type="button" id="copy-selected">复制所选直链</button>
+            <button class="btn sm danger" type="button" id="delete-selected">删除所选</button>
+            <button class="btn sm ghost" type="button" id="clear-selection">取消选择</button>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:38px"><input type="checkbox" id="check-all" class="row-check" aria-label="全选本页" /></th>
+                  <th style="width:74px">预览</th>
+                  <th>文件名</th>
+                  <th style="width:118px">尺寸</th>
+                  <th style="width:96px">体积</th>
+                  <th style="width:80px">来源</th>
+                  <th style="width:150px">上传时间</th>
+                  <th style="width:190px;text-align:right">操作</th>
+                </tr>
+              </thead>
+              <tbody id="image-tbody"></tbody>
+            </table>
+          </div>
+
+          <div class="pager">
+            <button class="btn sm" type="button" id="prev-page">上一页</button>
+            <span class="info" id="page-info">-</span>
+            <button class="btn sm" type="button" id="next-page">下一页</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ---------------------- 站点设置 ---------------------- -->
+      <div id="tab-settings" hidden>
+        <form id="settings-form">
+          <div class="card section">
+            <div class="section-head">
+              <div>
+                <h3>基础设置</h3>
+                <div class="desc">修改后立即生效，无需重启服务（配置持久化在 SQLite）</div>
+              </div>
+              <button class="btn primary" type="submit" id="save-settings">保存设置</button>
+            </div>
+
+            <div class="form-grid">
+              <div class="field">
+                <label for="s-site-name">站点名称</label>
+                <input type="text" id="s-site-name" data-key="site_name" maxlength="60" />
+              </div>
+
+              <div class="field">
+                <label>游客上传</label>
+                <label class="switch">
+                  <input type="checkbox" id="s-guest-enabled" data-key="guest_upload_enabled" data-type="bool" />
+                  <span class="track" aria-hidden="true"></span>
+                  <span>允许未登录访客上传图片</span>
+                </label>
+                <div class="desc">关闭后仅持有管理员 Token 的请求可上传。</div>
+              </div>
+
+              <div class="field">
+                <label for="s-guest-size">游客单文件上限</label>
+                <div class="input-suffix">
+                  <input type="number" id="s-guest-size" data-key="guest_max_file_size" data-type="mb" min="1" max="1024" step="1" />
+                  <span class="unit">MB</span>
+                </div>
+                <div class="desc">游客上传的硬性上限，是「可配置的游客大小上限」核心开关。</div>
+              </div>
+
+              <div class="field">
+                <label for="s-admin-size">管理员单文件上限</label>
+                <div class="input-suffix">
+                  <input type="number" id="s-admin-size" data-key="max_file_size" data-type="mb" min="1" max="5120" step="1" />
+                  <span class="unit">MB</span>
+                </div>
+              </div>
+
+              <div class="field">
+                <label for="s-max-files">单次请求文件数上限</label>
+                <input type="number" id="s-max-files" data-key="max_files" data-type="int" min="1" max="100" />
+              </div>
+
+              <div class="field">
+                <label for="s-formats">允许的格式</label>
+                <input type="text" id="s-formats" data-key="allowed_formats" data-type="csv"
+                       placeholder="jpg,jpeg,png,gif,webp,svg,avif" />
+                <div class="desc">逗号分隔的扩展名白名单。</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card section">
+            <div class="section-head">
+              <div>
+                <h3>图像处理</h3>
+                <div class="desc">动态图保留全部帧、SVG 保持矢量不栅格化；静态图按质量参数再压缩</div>
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label>服务端优化</label>
+                <label class="switch">
+                  <input type="checkbox" id="s-optimize" data-key="optimize" data-type="bool" />
+                  <span class="track" aria-hidden="true"></span>
+                  <span>对静态位图做再压缩（负优化自动回退）</span>
+                </label>
+              </div>
+              <div class="field">
+                <label for="s-quality">压缩质量</label>
+                <input type="number" id="s-quality" data-key="optimize_quality" data-type="int" min="30" max="100" />
+                <div class="desc">30–100，越高越清晰、体积越大。</div>
+              </div>
+              <div class="field">
+                <label for="s-thumb">缩略图宽度</label>
+                <div class="input-suffix">
+                  <input type="number" id="s-thumb" data-key="thumbnail_width" data-type="int" min="64" max="2000" />
+                  <span class="unit">px</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </form>
+      </div>
+
+      <!-- ---------------------- 存储与安全 ---------------------- -->
+      <div id="tab-storage" hidden>
+        <div class="card section">
+          <div class="section-head">
+            <div>
+              <h3>存储驱动</h3>
+              <div class="desc">
+                <strong>local</strong> 仅本地磁盘 ·
+                <strong>webdav</strong> 仅远端网盘 ·
+                <strong>hybrid</strong> 双写（本地直链 + WebDAV 异地备份）
+              </div>
+            </div>
+            <div style="display:flex;gap:8px">
+              <button class="btn sm" type="button" id="test-storage">测试连接</button>
+              <button class="btn primary" type="button" id="save-webdav">保存存储配置</button>
+            </div>
+          </div>
+
+          <div id="storage-health"></div>
+
+          <div class="form-grid" style="margin-top:14px">
+            <div class="field">
+              <label for="s-driver">当前驱动</label>
+              <select id="s-driver" data-key="storage_driver" data-type="enum">
+                <option value="local">local · 本地磁盘</option>
+                <option value="webdav">webdav · 远端网盘</option>
+                <option value="hybrid">hybrid · 本地 + WebDAV 双写</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="s-dav-url">WebDAV 地址</label>
+              <input type="text" id="s-dav-url" data-key="webdav_url" placeholder="https://dav.example.com/remote.php/dav/files/user" />
+              <div class="desc">Nextcloud / 坚果云 / 群晖 / Alist 的 WebDAV 根地址。</div>
+            </div>
+            <div class="field">
+              <label for="s-dav-user">WebDAV 用户名</label>
+              <input type="text" id="s-dav-user" data-key="webdav_username" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label for="s-dav-pass">WebDAV 密码 / 应用密码</label>
+              <input type="password" id="s-dav-pass" data-key="webdav_password" autocomplete="new-password"
+                     placeholder="留空表示不修改" />
+            </div>
+            <div class="field">
+              <label for="s-dav-dir">远端目录</label>
+              <input type="text" id="s-dav-dir" data-key="webdav_directory" placeholder="lumina" />
+              <div class="desc">不存在会自动递归创建。</div>
+            </div>
+            <div class="field">
+              <label for="s-dav-public">直链前缀（可选）</label>
+              <input type="text" id="s-dav-public" data-key="webdav_public_url" placeholder="https://cdn.example.com/lumina" />
+              <div class="desc">
+                请填写<strong>已包含远端目录</strong>的完整前缀，直链 = 前缀 + /年月/文件名，
+                因此不要再把目录写两遍。留空则自动使用「WebDAV 地址 + 远端目录」。
+                私有网盘必须填可公网直读的地址（或 Alist 中转地址），否则访客打不开直链。
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card section">
+          <div class="section-head">
+            <div>
+              <h3>管理员密码</h3>
+              <div class="desc">修改后所有已登录会话立即失效</div>
+            </div>
+          </div>
+          <form id="password-form" class="form-grid">
+            <div class="field">
+              <label for="old-password">原密码</label>
+              <input type="password" id="old-password" autocomplete="current-password" required />
+            </div>
+            <div class="field">
+              <label for="new-password">新密码</label>
+              <input type="password" id="new-password" autocomplete="new-password" minlength="6" required />
+              <div class="desc">至少 6 位。</div>
+            </div>
+            <div class="field" style="justify-content:flex-end">
+              <button class="btn primary" type="submit">修改密码</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="card section">
+          <div class="section-head">
+            <div>
+              <h3>程序化接入</h3>
+              <div class="desc">管理 API 需要 <code>Authorization: Bearer &lt;token&gt;</code></div>
+            </div>
+            <a class="btn sm" href="/api-docs" target="_blank" rel="noopener">查看完整 API 文档</a>
+          </div>
+          <div class="copybox">
+            <input readonly id="token-display" value="" aria-label="当前访问令牌" />
+            <button class="btn sm" type="button" id="copy-token">复制</button>
+          </div>
+          <div class="desc" style="margin-top:8px;color:var(--text-muted);font-size:12.5px">
+            可用于脚本、CI 或第三方客户端调用管理接口。
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    Lumina 图床 · 管理台 · <code>Node.js + Express + SQLite + Sharp</code>
+  </footer>
+
+  <script src="/js/common.js"></script>
+  <script src="/js/admin.js"></script>
+</body>
+</html>
