@@ -9,7 +9,7 @@
   <meta property="og:title" content="Lumina 图床" />
   <meta property="og:description" content="拖进来就上传，一键拿到多种格式的图片直链。" />
   <meta property="og:type" content="website" />
-  <link rel="icon" href="/favicon.svg" />
+  <link rel="icon" href="/favicon.ico" />
   <link rel="stylesheet" href="/css/style.css" />
 </head>
 <body>
@@ -55,19 +55,7 @@
       </div>
 
       <div class="options">
-        <label title="上传前在浏览器内把 JPG/PNG 转成 WebP，显著减小体积，服务端零开销">
-          <input type="checkbox" id="opt-webp" checked />
-          客户端转 WebP
-        </label>
-        <label title="WebP 有损质量，越高越清晰、体积越大">
-          质量
-          <input type="range" id="opt-quality" min="40" max="100" step="1" value="82" />
-          <span class="val" id="opt-quality-val">82</span>
-        </label>
-        <label>
-          <input type="checkbox" id="opt-autocopy" />
-          上传后自动复制直链
-        </label>
+        <span class="hint" id="client-policy-hint" hidden></span>
         <span class="spacer"></span>
         <span class="hint" id="limit-hint">加载配置中…</span>
       </div>
@@ -84,6 +72,7 @@
         <div class="actions">
           <button class="btn sm" type="button" id="copy-all-url">复制全部直链</button>
           <button class="btn sm" type="button" id="copy-all-md">复制全部 Markdown</button>
+          <button class="btn sm" type="button" id="copy-all-bbcode">复制全部 BBCode</button>
           <button class="btn sm" type="button" id="download-urls">导出列表</button>
           <button class="btn sm ghost" type="button" id="clear-results">清空</button>
         </div>

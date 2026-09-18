@@ -341,6 +341,10 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
     "max_file_size": 20971520,
     "max_files": 20,
     "allowed_formats": ["jpg", "jpeg", "png", "gif", "webp", "svg", "avif"],
+    "client_convert_webp": true,
+    "client_compress": false,
+    "client_webp_quality": 82,
+    "auto_copy_url": false,
     "thumbnail_width": 480,
     "storage_driver": "local",
     "webdav_configured": false
@@ -364,6 +368,10 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
 | max_file_size | int(字节) | 1KB–5GB | 管理员单文件上限 |
 | max_files | int | 1–100 | 单次请求文件数上限 |
 | storage_driver | enum | `local`/`webdav`/`hybrid` | 存储驱动 |
+| client_convert_webp | bool | — | 浏览器端转 WebP（默认开启，开关在管理台配置） |
+| client_compress | bool | — | 浏览器端有损压缩（默认关闭：仅转格式） |
+| client_webp_quality | int | 40–100 | 客户端 WebP 质量，仅开启 `client_compress` 时生效 |
+| auto_copy_url | bool | — | 上传完成后自动复制直链 |
 | optimize | bool | — | 是否服务端再压缩 |
 | optimize_quality | int | 30–100 | 压缩质量 |
 | thumbnail_width | int | 64–2000 | 缩略图宽度 |
@@ -372,7 +380,7 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
 | webdav_username | string | — | 用户名 |
 | webdav_password | string | — | 密码；**留空表示不修改** |
 | webdav_directory | string | — | 远端目录，自动递归创建 |
-| webdav_public_url | string | — | 直链前缀（**需已包含远端目录**），直链 = 前缀 + `/年月/文件名` |
+| webdav_public_url | string | — | （已废弃，仅保留兼容）WebDAV 直链现统一由本站代理路由 `/i/<key>` 提供，后端认证回源转发，不暴露 WebDAV 真实地址 |
 | dedupe | bool | — | 相同内容秒传去重 |
 
 ```bash

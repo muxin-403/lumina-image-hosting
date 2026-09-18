@@ -143,6 +143,16 @@ const config = {
     'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'avif',
   ]),
 
+  // --- 客户端上传行为（可在管理台热更新，前端不再展示这些开关） ---
+  /** 浏览器端把 JPG/PNG/BMP 转成 WebP（默认开启，服务端零算力开销） */
+  clientConvertWebp: envBool('CLIENT_CONVERT_WEBP', true),
+  /** 浏览器端按质量参数做有损压缩（默认关闭：仅转格式，质量按 100 处理） */
+  clientCompress: envBool('CLIENT_COMPRESS', false),
+  /** 开启客户端压缩时的 WebP 质量（40–100） */
+  clientWebpQuality: envInt('CLIENT_WEBP_QUALITY', 82),
+  /** 上传完成后自动复制最后一张图的直链 */
+  autoCopyUrl: envBool('AUTO_COPY_URL', false),
+
   // --- 图像处理 ---
   /** 对静态位图做无损/有损再压缩（动态图与 SVG 走独立分支） */
   optimize: envBool('OPTIMIZE', true),
@@ -166,7 +176,7 @@ const config = {
     username: env('WEBDAV_USERNAME', ''),
     password: env('WEBDAV_PASSWORD', ''),
     directory: env('WEBDAV_DIRECTORY', 'lumina').replace(/^\/+|\/+$/g, ''),
-    /** WebDAV 侧的公开访问前缀，留空则复用 url */
+    /** 已废弃（仅保留兼容）：直链统一由本站 /i/<key> 代理路由提供 */
     publicUrl: stripEndSlash(env('WEBDAV_PUBLIC_URL', '')),
     timeout: envInt('WEBDAV_TIMEOUT', 30000),
   },

@@ -8,11 +8,13 @@
  *
  * 两套地址，注意区分：
  *   remoteUrl(key) —— 实际读写用的地址 = <WEBDAV_URL>/<directory>/<key>
- *   url(key)       —— 对外直链 = <直链前缀>/<key>
- *                     直链前缀 = WEBDAV_PUBLIC_URL（若配置）否则 <WEBDAV_URL>/<directory>
- *
- * 也就是说 WEBDAV_PUBLIC_URL 是「已经包含远端目录」的完整前缀，
- * 例如 https://cdn.example.com/lumina —— 这样不会出现目录被拼两次的问题。
+ *                     仅在服务端使用（上传 PUT / 读取 GET / 删除 DELETE），
+ *                     始终携带 Basic 认证，绝不能返回给前端。
+ *   url(key)       —— 对外直链 = <站点基础地址>/i/<key>
+ *                     指向本站代理路由：浏览器请求 /i/<key> 时，由后端
+ *                     通过 WebDAV 协议从远端拉取内容并流式转发。
+ *                     这样即使 WebDAV 是私有网盘（直链不可访问），
+ *                     对外链接也始终可用，且不暴露任何后端真实地址。
  */
 
 const config = require('../../config');
@@ -23,10 +25,10 @@ const DIR_KEY_RE = /^[A-Za-z0-9_\-./]+$/;
 class WebDAVStorage {
   /**
    * @param {object} opt 运行时配置（来自 settings 表，可热更新）
-   *   { url, username, password, directory, publicUrl, timeout }
+   *   { url, username, password, directory, timeout }
    *
    * 注意：远端根地址存为 this.davUrl 而非 this.url —— 类上有一个
-   * url(key) 方法用于生成直链，若用同名实例属性会把它整个覆盖掉。
+   * url(key) 方法用于生成对外直链，若用同名实例属性会把它整个覆盖掉。
    */
   constructor(opt = {}) {
     this.name = 'webdav';
@@ -34,9 +36,6 @@ class WebDAVStorage {
     this.username = opt.username || '';
     this.password = opt.password || '';
     this.directory = String(opt.directory || 'lumina').replace(/^\/+|\/+$/g, '');
-    // 直链前缀：显式配置优先；否则退化为 <WebDAV 地址>/<远端目录>
-    const configuredPublic = String(opt.publicUrl || '').replace(/\/+$/, '');
-    this.publicBase = configuredPublic || `${this.davUrl}/${this.directory}`;
     this.timeout = Number(opt.timeout) || 30000;
   }
 
@@ -174,18 +173,27 @@ class WebDAVStorage {
   }
 
   /**
-   * 对外直链：<直链前缀>/<key>
-   * 直链前缀（publicBase）本身已包含远端目录，这里只拼 key，
-   * 否则会拼出 .../lumina/lumina/2026/09/x.png 这种重复目录。
+   * 从远端拉取文件内容（GET + Basic 认证），返回上游 Response。
+   * 仅供服务端代理转发使用，404 时返回 404 响应由调用方处理。
    */
-  url(key) {
+  fetch(key) {
+    return this.request('GET', this.remoteUrl(key), { okStatus: [404] });
+  }
+
+  /**
+   * 对外直链：<站点基础地址>/i/<key>
+   * 指向本站代理路由，由后端通过 WebDAV 协议拉取远端内容后转发。
+   * 绝不返回 WebDAV 后端真实地址，避免暴露存储凭据入口。
+   */
+  url(key, baseUrl) {
     if (!DIR_KEY_RE.test(key)) {
       const err = new Error(`非法的存储路径: ${key}`);
       err.status = 400;
       throw err;
     }
     const encoded = key.split('/').map(encodeURIComponent).join('/');
-    return `${this.publicBase}/${encoded}`;
+    const base = String(baseUrl || '').replace(/\/+$/, '');
+    return `${base}/i/${encoded}`;
   }
 
   /** 连通性自检（供管理台「测试连接」按钮调用） */

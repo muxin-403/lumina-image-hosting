@@ -12,6 +12,7 @@ const crypto = require('crypto');
 const config = require('../config');
 const { Settings } = require('../db');
 const { logger } = require('../utils');
+const faviconService = require('./favicon');
 
 /** 可按 key 前缀热更新的配置白名单及默认值（取自 .env） */
 const DEFAULTS = {
@@ -21,6 +22,10 @@ const DEFAULTS = {
   max_file_size: config.maxFileSize,
   max_files: config.maxFiles,
   storage_driver: config.storageDriver,
+  client_convert_webp: config.clientConvertWebp,
+  client_compress: config.clientCompress,
+  client_webp_quality: config.clientWebpQuality,
+  auto_copy_url: config.autoCopyUrl,
   optimize: config.optimize,
   optimize_quality: config.optimizeQuality,
   thumbnail_width: config.thumbnailWidth,
@@ -118,16 +123,25 @@ const settings = {
       max_file_size: Number(this.get('max_file_size')),
       max_files: Number(this.get('max_files')),
       allowed_formats: this.get('allowed_formats') || [],
+      client_convert_webp: !!this.get('client_convert_webp'),
+      client_compress: !!this.get('client_compress'),
+      client_webp_quality: Number(this.get('client_webp_quality')),
+      auto_copy_url: !!this.get('auto_copy_url'),
       thumbnail_width: Number(this.get('thumbnail_width')),
       storage_driver: this.get('storage_driver'),
       webdav_configured: webdavConfigured,
+      /** 站点图标地址（自定义时带版本号破缓存；未设置时回落默认图标） */
+      favicon_url: faviconService.publicUrl(),
     };
   },
 
   /** 管理台可见的完整配置（隐藏关键凭据） */
   adminConfig() {
+    const favicon = faviconService.current();
     return {
       ...this.publicConfig(),
+      favicon_set: !!favicon,
+      favicon_ext: favicon ? favicon.ext : '',
       optimize: !!this.get('optimize'),
       optimize_quality: Number(this.get('optimize_quality')),
       webdav_url: this.get('webdav_url') || '',

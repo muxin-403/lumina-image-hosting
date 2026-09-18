@@ -70,9 +70,19 @@ class StorageFacade {
     return this.primary.exists(key);
   }
 
-  /** 对外直链（基于主存储） */
+  /** 对外直链（基于主存储）。WebDAV 模式下返回本站代理链，不暴露远端地址 */
   url(key, baseUrl) {
     return this.primary.url(key, baseUrl);
+  }
+
+  /**
+   * 从 WebDAV 驱动拉取远端文件（GET + 认证），返回上游 Response。
+   * 用于 /i、/t、/d 路由的服务端代理转发，避免把 WebDAV 真实地址暴露给前端。
+   * 驱动列表中不存在 WebDAV 时返回 null。
+   */
+  remoteFetch(key) {
+    const drv = this.drivers.find((d) => d.name === 'webdav' && typeof d.fetch === 'function');
+    return drv ? drv.fetch(key) : null;
   }
 
   /** 健康检查：返回每个驱动的可用状态 */
@@ -104,7 +114,6 @@ function createStorage() {
       username: settings.get('webdav_username'),
       password: settings.get('webdav_password'),
       directory: settings.get('webdav_directory'),
-      publicUrl: settings.get('webdav_public_url'),
       timeout: settings.get('webdav_timeout') || 30000,
     });
 

@@ -6,7 +6,7 @@
 (() => {
   'use strict';
 
-  const { request, store, toast, copyWithToast, escapeHtml, formatSize, formatTime, debounce, TOKEN_KEY } = Lumina;
+  const { request, store, toast, copyWithToast, escapeHtml, formatSize, formatTime, debounce, applyFavicon, TOKEN_KEY } = Lumina;
 
   const $ = (id) => document.getElementById(id);
 
@@ -71,6 +71,7 @@
         $('brand-name').textContent = cfg.site_name;
         document.title = `管理台 · ${cfg.site_name}`;
       }
+      applyFavicon(cfg.favicon_url);
     } catch (_) { /* 忽略 */ }
   }
 
@@ -442,10 +443,71 @@
       const cfg = await request('/api/settings');
       apply($('settings-form'), cfg);
       apply($('tab-storage'), cfg);
+      renderFavicon(cfg);
       $('token-display').value = store.get(TOKEN_KEY) || '';
     } catch (err) {
       toast(`配置加载失败：${err.message}`, 'error');
     }
+  }
+
+  /* ============================== 站点图标 ============================== */
+
+  const FAVICON_DEFAULT = '/favicon.svg';
+
+  /** 按后端配置渲染图标预览与按钮状态 */
+  function renderFavicon(cfg) {
+    const set = !!(cfg && cfg.favicon_set);
+    // 预览加时间戳破缓存，避免刚上传的图标被浏览器缓存挡住
+    const bust = (u) => `${u}${u.includes('?') ? '&' : '?'}_=${Date.now()}`;
+    $('favicon-preview').src = set ? bust(cfg.favicon_url) : bust(FAVICON_DEFAULT);
+    $('favicon-reset').hidden = !set;
+    $('favicon-ext').textContent = set
+      ? `当前自定义图标：.${cfg.favicon_ext}`
+      : '当前使用默认图标';
+  }
+
+  function bindFavicon() {
+    $('favicon-upload').addEventListener('click', () => $('favicon-input').click());
+
+    $('favicon-input').addEventListener('change', async () => {
+      const input = $('favicon-input');
+      const file = input.files && input.files[0];
+      if (!file) return;
+      if (file.size > 1024 * 1024) {
+        toast('图标不能超过 1MB', 'error');
+        input.value = '';
+        return;
+      }
+
+      const btn = $('favicon-upload');
+      btn.disabled = true;
+      btn.textContent = '上传中…';
+      try {
+        const fd = new FormData();
+        fd.append('file', file);
+        const res = await request('/api/favicon', { method: 'POST', body: fd });
+        renderFavicon({ favicon_set: true, favicon_ext: res.ext, favicon_url: res.favicon_url });
+        applyFavicon(res.favicon_url); // 本页图标立即切换
+        toast('站点图标已更新', 'success');
+      } catch (err) {
+        toast(`上传失败：${err.message}`, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '上传图标';
+        input.value = '';
+      }
+    });
+
+    $('favicon-reset').addEventListener('click', async () => {
+      try {
+        const res = await request('/api/favicon', { method: 'DELETE' });
+        renderFavicon({ favicon_set: false });
+        applyFavicon(res.favicon_url);
+        toast('已恢复默认图标', 'success');
+      } catch (err) {
+        toast(`操作失败：${err.message}`, 'error');
+      }
+    });
   }
 
   function bindSettingsForm() {
@@ -551,6 +613,7 @@
     bindTableActions();
     bindFilters();
     bindSettingsForm();
+    bindFavicon();
     bindPassword();
     boot();
   });

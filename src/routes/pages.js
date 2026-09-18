@@ -3,9 +3,11 @@
 /**
  * 资源路由与页面
  * ------------------------------------------------------------------
- *   GET /i/<yyyy/mm/xxx.ext>   图片直链（本地驱动；WebDAV 驱动自动 302 到对象地址）
- *   GET /t/:id                 缩略图（本地缓存，WebP）
- *   GET /d/:id                 强制下载（WebDAV 场景下由服务端代理，解决私有网盘直链不可访问）
+ *   GET /i/<yyyy/mm/xxx.ext>   图片直链：本地命中直接吐流；否则由后端通过
+ *                              WebDAV 协议拉取远端内容并代理转发（绝不 302
+ *                              到 WebDAV 真实地址，也不暴露该地址）
+ *   GET /t/:id                 缩略图（本地缓存，WebP；缺失时代理回落原图）
+ *   GET /d/:id                 强制下载（WebDAV 场景由服务端代理转发）
  *   GET /img/:id               图片详情页（带 og:image，便于分享）
  *   GET /admin                 管理台
  *   GET /404 / 静态资源          public/
@@ -14,14 +16,16 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const { Readable } = require('stream');
 const config = require('../config');
 const { Images } = require('../db');
 const { storageManager } = require('../services/settings');
+const faviconService = require('../services/favicon');
 const { baseUrlOf } = require('../services/uploader');
 const { EXT_MIME } = require('../services/image');
 const { KEY_RE } = require('../services/storage/local');
 const { asyncHandler } = require('../middleware/error');
-const { ApiError } = require('../utils');
+const { ApiError, logger } = require('../utils');
 
 const router = express.Router();
 
@@ -47,6 +51,70 @@ function sendLocal(res, absPath, mime, opts = {}) {
   return true;
 }
 
+/**
+ * 服务端代理转发远端（WebDAV）文件内容。
+ * 后端通过 WebDAV 协议（GET + 认证）拉取内容后流式转发给客户端，
+ * 全程不向客户端暴露 WebDAV 真实地址与凭据。
+ * @returns {boolean} true=已接管响应；false=远端不存在（404），调用方可继续 404 流程
+ */
+async function proxyRemote(res, key, { mime, download, cache } = {}) {
+  const storage = storageManager.get();
+  if (!storage.remoteFetch) return false;
+
+  const upstream = await storage.remoteFetch(key);
+  if (!upstream) return false;
+  if (upstream.status === 404) return false;
+  if (!upstream.ok || !upstream.body) {
+    throw new ApiError(502, `上游存储返回 ${upstream.status}`, 'UPSTREAM_ERROR');
+  }
+
+  res.setHeader('Cache-Control', cache || IMMUTABLE);
+  if (download) {
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename*=UTF-8''${encodeURIComponent(download)}`,
+    );
+  }
+  if (mime === 'image/svg+xml') {
+    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'");
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+  }
+  res.type(mime || 'application/octet-stream');
+  const len = upstream.headers.get('content-length');
+  if (len) res.setHeader('Content-Length', len);
+
+  try {
+    Readable.fromWeb(upstream.body).pipe(res);
+  } catch (err) {
+    logger.warn('WebDAV 代理转发失败', { key, err: err.message });
+    if (!res.headersSent) throw new ApiError(502, '代理转发失败', 'PROXY_ERROR');
+  }
+  return true;
+}
+
+/* ---------------------------- 站点图标 ---------------------------- */
+
+/**
+ * favicon 统一出口（挂载在静态资源之前，优先于 express.static 命中）：
+ *   - 已上传自定义图标：无论请求 /favicon.ico|png|svg 都返回当前图标（MIME 随真实格式）
+ *   - 未设置：回落 public/favicon.svg 默认图标
+ * 自定义图标用较短缓存（5 分钟），前台通过 /favicon.ico?v=<ts> 破缓存。
+ */
+router.get(['/favicon.ico', '/favicon.png', '/favicon.svg', '/favicon'], (req, res, next) => {
+  const cur = faviconService.current();
+  if (cur && sendLocal(res, cur.abs, cur.mime, { cache: 'public, max-age=300' })) {
+    return undefined;
+  }
+  if (
+    sendLocal(res, faviconService.DEFAULT_FAVICON, 'image/svg+xml', {
+      cache: config.isProd ? 'public, max-age=3600' : 'no-store',
+    })
+  ) {
+    return undefined;
+  }
+  return next(); // 默认图标文件缺失时交回 404 流程
+});
+
 /* ---------------------------- 图片直链 ---------------------------- */
 
 router.get(
@@ -58,12 +126,15 @@ router.get(
     const mime = EXT_MIME[path.extname(key).slice(1).toLowerCase()] || 'application/octet-stream';
     const abs = path.join(config.storageDir, key);
 
+    // 1) 本地命中（local / hybrid 模式）直接吐流
     if (sendLocal(res, abs, mime)) return undefined;
 
-    // 本地不存在（例如驱动已切到 WebDAV）：按记录重定向到远端地址
+    // 2) 本地不存在：由后端通过 WebDAV 协议拉取并代理转发，
+    //    绝不重定向到 WebDAV 真实地址（避免暴露且私有网盘直链本就不可访问）
     const row = Images.getByKey(key);
-    if (row && row.storage_driver === 'webdav') {
-      return res.redirect(302, storageManager.get().url(key, baseUrlOf(req)));
+    if (row) {
+      const proxied = await proxyRemote(res, key, { mime });
+      if (proxied) return undefined;
     }
     return next();
   }),
@@ -84,12 +155,13 @@ router.get(
       const abs = path.join(config.thumbDir, row.thumb_key);
       if (sendLocal(res, abs, 'image/webp')) return undefined;
     }
-    // 缩略图缺失：回落到原图（本地或 WebDAV）
+    // 缩略图缺失：回落到原图（本地命中直接吐流，否则代理转发远端原图）
     const key = row.storage_key;
     const localAbs = path.join(config.storageDir, key);
     const mime = EXT_MIME[row.ext] || 'application/octet-stream';
     if (sendLocal(res, localAbs, mime, { cache: 'public, max-age=3600' })) return undefined;
-    return res.redirect(302, storageManager.get().url(key, baseUrlOf(req)));
+    if (await proxyRemote(res, key, { mime, cache: 'public, max-age=3600' })) return undefined;
+    return next();
   }),
 );
 
@@ -107,27 +179,18 @@ router.get(
     const mime = EXT_MIME[row.ext] || 'application/octet-stream';
     const filename = row.original_name || `${row.id}.${row.ext}`;
     const localAbs = path.join(config.storageDir, row.storage_key);
-    if (sendLocal(res, localAbs, mime, { cache: 'no-store', download: filename })) return undefined;
-
-    // WebDAV 代理下载（私有网盘场景下直链不可用时的兜底通道）
-    const storage = storageManager.get();
-    const remote = storage.url(row.storage_key, baseUrlOf(req));
-    const upstream = await fetch(remote, {
-      headers: storage.primary.authHeader ? { Authorization: storage.primary.authHeader() } : {},
-    });
-    if (!upstream.ok) throw new ApiError(502, `上游存储返回 ${upstream.status}`, 'UPSTREAM_ERROR');
-
-    res.setHeader('Content-Type', mime);
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
-    );
-    if (upstream.headers.get('content-length')) {
-      res.setHeader('Content-Length', upstream.headers.get('content-length'));
+    if (sendLocal(res, localAbs, mime, { cache: 'no-store', download: filename })) {
+      return undefined;
     }
-    const buf = Buffer.from(await upstream.arrayBuffer());
-    return res.end(buf);
+
+    // 本地不存在：由后端通过 WebDAV 协议拉取并代理转发（不暴露远端地址）
+    const proxied = await proxyRemote(res, row.storage_key, {
+      mime,
+      cache: 'no-store',
+      download: filename,
+    });
+    if (proxied) return undefined;
+    return next();
   }),
 );
 
@@ -159,7 +222,7 @@ router.get(
 <meta property="og:title" content="${esc(row.original_name)}" />
 <meta property="og:image" content="${esc(url)}" />
 <meta name="twitter:card" content="summary_large_image" />
-<link rel="icon" href="/favicon.svg" />
+<link rel="icon" href="/favicon.ico" />
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }

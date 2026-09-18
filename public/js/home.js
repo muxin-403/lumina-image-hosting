@@ -6,7 +6,7 @@
 (() => {
   'use strict';
 
-  const { request, toast, copyWithToast, formatSize, escapeHtml, downloadText } = Lumina;
+  const { request, toast, copyWithToast, formatSize, escapeHtml, downloadText, applyFavicon } = Lumina;
 
   /* ------------------------------- 元素 ------------------------------- */
   const $ = (id) => document.getElementById(id);
@@ -19,15 +19,23 @@
   const resultsSection = $('results-section');
   const emptyTip = $('empty-tip');
   const resultCount = $('result-count');
-  const optWebp = $('opt-webp');
-  const optQuality = $('opt-quality');
-  const optQualityVal = $('opt-quality-val');
-  const optAutocopy = $('opt-autocopy');
 
   /** 内存中的上传结果（用于「复制全部 / 导出」） */
   const results = [];
-  /** 站点配置（来自 /api/config） */
-  let config = { allowed_formats: [], guest_upload_enabled: true, max_files: 20 };
+  /**
+   * 站点配置（来自 /api/config）。
+   * 客户端上传策略（是否转 WebP / 是否压缩 / 质量 / 自动复制）
+   * 由管理台统一配置，前端只读不展示开关。
+   */
+  let config = {
+    allowed_formats: [],
+    guest_upload_enabled: true,
+    max_files: 20,
+    client_convert_webp: true,
+    client_compress: false,
+    client_webp_quality: 82,
+    auto_copy_url: false,
+  };
 
   const FORMAT_TABS = [
     { key: 'url', label: '直链' },
@@ -44,6 +52,7 @@
       config = await request('/api/config');
       $('brand-name').textContent = config.site_name || 'Lumina 图床';
       document.title = `${config.site_name || 'Lumina 图床'} · 拖拽即上传`;
+      applyFavicon(config.favicon_url);
       $('formats-hint').textContent = (config.allowed_formats || [])
         .map((f) => f.toUpperCase())
         .join(' · ');
@@ -53,6 +62,19 @@
         ? `游客单文件 ≤ ${formatSize(config.guest_max_file_size)} · 单次 ≤ ${config.max_files} 个`
         : '本站已关闭游客上传，仅管理员可上传';
       $('limit-hint').textContent = limiter;
+
+      // 展示管理台下发的客户端处理策略（前端无开关，仅提示）
+      const policy = [];
+      if (config.client_convert_webp) {
+        policy.push(config.client_compress
+          ? `客户端转 WebP（质量 ${config.client_webp_quality}）`
+          : '客户端转 WebP（不压缩）');
+      }
+      const policyEl = $('client-policy-hint');
+      if (policyEl) {
+        policyEl.textContent = policy.length ? `${policy.join('，')} · 策略由管理台配置` : '';
+        policyEl.hidden = policy.length === 0;
+      }
 
       if (!config.guest_upload_enabled) {
         dz.style.opacity = '.7';
@@ -189,7 +211,10 @@
       toast(`单次最多 ${maxFiles} 个文件，本次仅上传前 ${maxFiles} 个`, 'info', 4000);
     }
 
-    const quality = Number(optQuality.value) / 100;
+    // 压缩策略由管理台配置：未开启压缩时按最高质量编码（仅转格式、不做有损压缩）
+    const quality = config.client_convert_webp && config.client_compress
+      ? Math.min(100, Math.max(40, Number(config.client_webp_quality) || 82)) / 100
+      : 1;
     let okCount = 0;
     let failCount = 0;
     let savedBytes = 0;
@@ -210,7 +235,7 @@
 
       let file = raw;
       let converted = false;
-      if (optWebp.checked) {
+      if (config.client_convert_webp) {
         const r = await convertToWebp(raw, quality);
         file = r.file;
         converted = r.converted;
@@ -246,7 +271,7 @@
       const extra = savedBytes > 0 ? `，客户端转 WebP 省下 ${formatSize(savedBytes)}` : '';
       toast(`成功上传 ${okCount} 张${failCount ? `，失败 ${failCount} 张` : ''}${extra}`, 'success', 3400);
     }
-    if (okCount && optAutocopy.checked && lastUrl) {
+    if (okCount && config.auto_copy_url && lastUrl) {
       copyWithToast(lastUrl, '直链已复制到剪贴板');
     }
   }
@@ -410,18 +435,6 @@
     });
   }
 
-  function bindOptions() {
-    optQuality.addEventListener('input', () => {
-      optQualityVal.textContent = optQuality.value;
-    });
-    optWebp.addEventListener('change', () => {
-      if (optWebp.checked && typeof createImageBitmap !== 'function') {
-        toast('当前浏览器不支持客户端 WebP 转换，已自动关闭该选项', 'error', 4000);
-        optWebp.checked = false;
-      }
-    });
-  }
-
   function bindResultActions() {
     resultList.addEventListener('click', (e) => {
       const tabBtn = e.target.closest('.tabs button');
@@ -448,6 +461,11 @@
       copyWithToast(results.map((r) => r.formats.markdown).join('\n'), `已复制 ${results.length} 条 Markdown`);
     });
 
+    $('copy-all-bbcode').addEventListener('click', () => {
+      if (!results.length) return;
+      copyWithToast(results.map((r) => r.formats.bbcode).join('\n'), `已复制 ${results.length} 条 BBCode`);
+    });
+
     $('download-urls').addEventListener('click', () => {
       if (!results.length) return;
       const lines = [
@@ -471,7 +489,6 @@
   document.addEventListener('DOMContentLoaded', () => {
     bindDropzone();
     bindPaste();
-    bindOptions();
     bindResultActions();
     loadConfig();
   });

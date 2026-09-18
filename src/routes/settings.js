@@ -6,16 +6,26 @@
  *   GET   /api/settings         完整配置（管理员）
  *   PATCH /api/settings         更新配置（管理员，即时生效，无需重启）
  *   DELETE /api/settings/:key   恢复某项为 .env / 默认值（管理员）
+ *   POST   /api/favicon         上传 / 替换站点图标（管理员）
+ *   DELETE /api/favicon         恢复默认站点图标（管理员）
  *   GET   /api/storage/health   存储驱动健康检查（管理员）
  */
 
 const express = require('express');
+const multer = require('multer');
 const { settings, storageManager, DEFAULTS } = require('../services/settings');
+const faviconService = require('../services/favicon');
 const { requireAdmin } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/error');
 const { ApiError, ok, humanSize } = require('../utils');
 
 const router = express.Router();
+
+/** 站点图标上传：内存暂存，体积按 favicon 服务上限约束 */
+const faviconUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: faviconService.MAX_SIZE, files: 1, fields: 5 },
+});
 
 /** 可被 PATCH 的字段及类型校验规则 */
 const SCHEMA = {
@@ -25,6 +35,10 @@ const SCHEMA = {
   max_file_size: { type: 'size', min: 1024, max: 5 * 1024 * 1024 * 1024 },
   max_files: { type: 'int', min: 1, max: 100 },
   storage_driver: { type: 'enum', values: ['local', 'webdav', 'hybrid'] },
+  client_convert_webp: { type: 'boolean' },
+  client_compress: { type: 'boolean' },
+  client_webp_quality: { type: 'int', min: 40, max: 100 },
+  auto_copy_url: { type: 'boolean' },
   optimize: { type: 'boolean' },
   dedupe: { type: 'boolean' },
   optimize_quality: { type: 'int', min: 30, max: 100 },
@@ -130,6 +144,46 @@ router.delete(
     if (!(key in DEFAULTS)) throw new ApiError(400, `不支持的配置项：${key}`, 'UNKNOWN_SETTING');
     settings.reset(key);
     return ok(res, { key, value: settings.get(key), message: '已恢复为环境变量 / 默认值' });
+  }),
+);
+
+/* ----------------------------- 站点图标 ----------------------------- */
+
+/**
+ * 上传 / 替换站点图标（管理员）
+ * 格式按文件内容嗅探校验（.ico / .png / .svg / .jpg / .gif / .webp），
+ * 成功后立即生效：/favicon.* 出口直接返回新图标。
+ */
+router.post(
+  '/favicon',
+  requireAdmin,
+  (req, res, next) => {
+    faviconUpload.single('file')(req, res, (err) => {
+      if (!err) return next();
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return next(new ApiError(413, `图标不能超过 ${humanSize(faviconService.MAX_SIZE)}`, 'FILE_TOO_LARGE'));
+      }
+      return next(new ApiError(400, `图标上传失败：${err.message}`, 'UPLOAD_ERROR'));
+    });
+  },
+  asyncHandler(async (req, res) => {
+    if (!req.file) throw new ApiError(400, '未接收到文件（字段名请使用 file）', 'NO_FILE');
+    const icon = faviconService.save(req.file.buffer);
+    return ok(res, {
+      ext: icon.ext,
+      favicon_url: faviconService.publicUrl(),
+      message: '站点图标已更新，刷新页面即可看到新图标',
+    });
+  }),
+);
+
+/** 恢复默认站点图标（管理员）：删除自定义文件与元信息 */
+router.delete(
+  '/favicon',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    faviconService.reset();
+    return ok(res, { favicon_url: faviconService.publicUrl(), message: '已恢复默认图标' });
   }),
 );
 

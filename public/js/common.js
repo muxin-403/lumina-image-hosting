@@ -147,6 +147,21 @@ const Lumina = (() => {
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
+  /**
+   * 应用站点图标：用 /api/config 下发的带版本号地址替换页面 <link rel="icon">
+   * （服务端图标更新后，版本号变化可穿透浏览器缓存）
+   */
+  function applyFavicon(url) {
+    if (!url || typeof url !== 'string') return;
+    let link = document.querySelector('link[rel="icon"]');
+    if (!link) {
+      link = document.createElement('link');
+      link.rel = 'icon';
+      document.head.appendChild(link);
+    }
+    if (link.getAttribute('href') !== url) link.setAttribute('href', url);
+  }
+
   function debounce(fn, wait = 280) {
     let timer = null;
     return (...args) => {
@@ -168,5 +183,5 @@ const Lumina = (() => {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  return { store, request, toast, copy, copyWithToast, formatSize, formatTime, escapeHtml, debounce, downloadText, TOKEN_KEY };
+  return { store, request, toast, copy, copyWithToast, formatSize, formatTime, escapeHtml, applyFavicon, debounce, downloadText, TOKEN_KEY };
 })();

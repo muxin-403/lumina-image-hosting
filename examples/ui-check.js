@@ -233,7 +233,9 @@ async function main() {
 
   assert(pu.errors.length === 0, '上传页在注入 Canvas 替身后无运行时异常',
     pu.errors.slice(0, 2).join(' | '));
-  assert(PD.querySelector('#opt-webp').checked === true, '「客户端转 WebP」选项默认开启');
+  // 转换开关已移至管理台：上传页不应再有本地开关，只读策略提示由 /api/config 下发
+  assert(PD.querySelector('#opt-webp') === null, '上传页不再展示「客户端转 WebP」开关（已移至管理台）');
+  assert(PD.querySelector('#client-policy-hint') !== null, '上传页展示由管理台配置下发的策略提示');
 
   mockCanvas(PW, 'image/webp');
   const rJpg = await pickAndUpload(PW, PD,
@@ -272,17 +274,16 @@ async function main() {
     '回退场景下不显示「客户端转 WebP」徽标（不虚报收益）');
   pv.window.close();
 
-  // —— 3.4 浏览器完全不支持时：自动关闭选项并明确提示，而非静默失败 ——
+  // —— 3.4 浏览器完全不支持 createImageBitmap 时：静默按原格式上传，不报错 ——
   const pw = await loadPage('/');
   delete pw.window.createImageBitmap; // 模拟不支持的旧浏览器
-  const optWebpEl = pw.document.querySelector('#opt-webp');
-  optWebpEl.checked = true;
-  optWebpEl.dispatchEvent(new pw.window.Event('change', { bubbles: true }));
-  await sleep(150);
+  const rUnsupported = await pickAndUpload(pw.window, pw.document,
+    new pw.window.File([assetBytes('sample.jpg')], 'no-bitmap.jpg', { type: 'image/jpeg' }));
 
-  assert(optWebpEl.checked === false, '浏览器不支持 createImageBitmap 时自动取消勾选');
-  assert(/不支持客户端 WebP 转换/.test(pw.document.body.textContent),
-    '并给出用户可见的提示文案（不是静默失败）');
+  assert(/\.jpg$/.test(rUnsupported.url),
+    '浏览器不支持 createImageBitmap 时按原格式上传（无开关、无报错）', rUnsupported.url);
+  assert(!/客户端转 WebP/.test(rUnsupported.card ? rUnsupported.card.textContent : ''),
+    '不支持场景下不显示「客户端转 WebP」徽标');
   pw.window.close();
 
   /* ------------------------- 4. 管理台 ------------------------- */

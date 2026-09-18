@@ -106,7 +106,7 @@ url(key, baseUrl)      -> string           // 对外直链
 | 模式 | 行为 | 直链来源 |
 | --- | --- | --- |
 | `local` | 仅本地磁盘 | `<站点>/i/<yyyy/mm/id.ext>` |
-| `webdav` | 仅远端网盘 | `WEBDAV_PUBLIC_URL` + `/` + key |
+| `webdav` | 仅远端网盘 | `<站点>/i/<yyyy/mm/id.ext>`（本站代理：后端认证回源 WebDAV 后转发，不暴露真实地址） |
 | `hybrid` | 本地 + WebDAV 双写 | 走本地（本地必定可公开访问），WebDAV 作异地备份 |
 
 副本写入失败只告警不阻断上传；主存储失败则整体失败并返回 `STORAGE_WRITE_FAILED`。
@@ -213,10 +213,8 @@ image-hosting/
 
 - `MKCOL` 递归建目录：目录已存在服务端返回 `405`，必须显式放行，否则误判失败；
   父目录未就绪返回 `409`，重试一次；**空路径也要建**，因为不少自建网盘不会自动创建根目录。
-- 两套地址严格区分：`remoteUrl()` 是读写地址（含远端目录），`url()` 是直链地址。
-  `WEBDAV_PUBLIC_URL` 语义是「已包含远端目录的完整前缀」，因此 `url()` 只拼 key。
-  > 这里踩过一个真实的坑：早期版本两者都拼目录，生成了 `.../lumina/lumina/2026/09/x.png`。
-  > 现在有一条专门的断言守着它。
+- 两套地址严格区分：`remoteUrl()` 是读写地址（含远端目录，仅服务端使用），
+  `url()` 是对外直链，指向本站代理路由 `/i/<key>`，绝不返回 WebDAV 真实地址。
 - 有一个容易忽视的 JS 陷阱：类上若存在 `url()` 方法，就**不能**再用 `this.url = '...'`
   存配置字符串 —— 实例属性会直接覆盖原型方法。因此根地址存为 `this.davUrl`。
 
@@ -580,9 +578,9 @@ curl -X PATCH http://localhost:3000/api/settings -H "Authorization: Bearer $TOKE
    SQLite 已开 WAL 模式，热备份请用 `sqlite3 data/lumina.db ".backup out.db"`。
 5. **反代需放宽请求体**：`client_max_body_size`（Nginx）要大于你的最大上传限制。
 6. **限流**：内置限流是单进程内存实现，多副本部署请把限流下沉到网关或 Redis。
-7. **WebDAV 私有网盘**：务必配置 `WEBDAV_PUBLIC_URL` 指向可公网直读的地址
-   （网盘分享域名或 Alist 中转）。若网盘确实无法公开直读，可让访客走
-   `/d/:id` 由服务端代理下载，但注意这会消耗服务器带宽。
+7. **WebDAV 私有网盘**：无需额外配置。所有直链走本站 `/i/<key>` 代理路由，
+   后端通过 WebDAV 协议认证回源后转发内容，真实地址与凭据不出站。
+   注意代理转发会消耗服务器带宽，大流量场景建议在前面加 CDN 缓存。
 8. **HTTPS**：生产环境请务必启用，Cookie 的 `Secure` 属性在
    `NODE_ENV=production` 下会自动开启。
 

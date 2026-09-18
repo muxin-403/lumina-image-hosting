@@ -7,7 +7,8 @@
  * Basic 认证），然后把图床的存储驱动切到 webdav，验证：
  *   1. 连接自检（探针写入 + 删除）
  *   2. 上传时确实发起 MKCOL 建目录与 PUT 写文件
- *   3. 生成的直链指向 WebDAV 公共前缀，且远端内容与上传字节一致
+ *   3. 生成的直链指向本站代理路由（/i/<key>），绝不含 WebDAV 真实地址；
+ *      访问直链时由后端通过 WebDAV 协议认证回源并代理转发
  *   4. 缩略图仍由图床本地服务（WebDAV 场景下列表依然秒开）
  *   5. 删除时向 WebDAV 发起 DELETE
  *   6. 最后把驱动恢复为 local
@@ -52,9 +53,9 @@ const section = (t) => console.log(`\n\x1b[36m${t}\x1b[0m`);
  * 内存文件系统：key -> Buffer；另有操作日志用于断言
  *
  * 刻意模拟真实网盘的两条路径：
- *   /dav/...    需要 Basic 认证（读写入口）
- *   /public/... 只读、免认证（对外直链入口）
- * 这正是 WebDAV 驱动里 WEBDAV_PUBLIC_URL 存在的原因。
+ *   /dav/...    需要 Basic 认证（读写入口，仅图床后端使用）
+ *   /public/... 只读、免认证（模拟某些网盘的可选公开入口，本测试不依赖它）
+ * 图床的对外直链不指向这里任何一条，而是指向本站 /i/<key> 代理路由。
  */
 function createMockWebDAV() {
   const files = new Map();
@@ -209,8 +210,6 @@ async function main() {
       webdav_username: DAV_USER,
       webdav_password: DAV_PASS,
       webdav_directory: 'lumina',
-      // 对外直链走「免认证的只读路径」，模拟 CDN / Alist 中转
-      webdav_public_url: `http://127.0.0.1:${DAV_PORT}/public/lumina`,
     });
     assert(switchRes.status === 200, 'PATCH /api/settings 切换到 WebDAV 驱动',
       `字段 ${switchRes.body.data.updated.join(', ')}`);
@@ -247,31 +246,43 @@ async function main() {
     assert(upRes.status === 200, '上传成功', `HTTP ${upRes.status}`);
     assert(item && item.storage_driver === 'webdav', '记录中存储驱动为 webdav',
       item && item.storage_driver);
-    assert(item && item.url.startsWith(`http://127.0.0.1:${DAV_PORT}/public/lumina/`),
-      '直链指向配置的公共前缀（且未重复拼接目录）', item && item.url);
-    assert(item && !/lumina\/lumina\//.test(item.url),
-      '直链前缀与远端目录没有被重复拼接');
+    assert(item && item.url.startsWith(`${BASE}/i/`),
+      '直链指向本站代理路由 /i/<key>', item && item.url);
+    assert(item && !item.url.includes(`${DAV_PORT}`) && !/\/dav\//.test(item.url),
+      '直链不含 WebDAV 真实地址（主机与 /dav/ 路径均未暴露）', item && item.url);
 
-    const publicFetch = await fetch(item.url);
-    assert(publicFetch.status === 200, '直链无需任何认证即可公开访问（访客可读）',
-      `HTTP ${publicFetch.status}`);
-    const privateFetch = await fetch(item.url.replace('/public/', '/dav/'));
-    assert(privateFetch.status === 401, '对比：私有读写路径未授权访问被拒绝',
-      `HTTP ${privateFetch.status}`);
-
-    uploadedId = item.id;
-    uploadedUrl = item.url;
-
+    // 上传过程的 WebDAV 操作记录（PUT / MKCOL），断言后清空以便统计代理回源请求
     const puts = dav.log.filter((l) => l.method === 'PUT');
     assert(puts.length >= 1, 'WebDAV 收到 PUT 请求', puts.map((p) => p.key).join(', '));
     assert(puts.some((p) => p.key.startsWith('lumina/20')), '文件落在配置的远端目录下');
 
     const mkcols = dav.log.filter((l) => l.method === 'MKCOL');
     assert(mkcols.length >= 1, '按年月自动创建远端目录', mkcols.map((m) => m.key).join(', '));
+    const remoteKey = puts[0].key;
+
+    // 访问直链：应由后端代理回源 WebDAV 并转发内容
+    dav.log.length = 0;
+    const publicFetch = await fetch(item.url);
+    assert(publicFetch.status === 200, '直链无需任何认证即可公开访问（访客可读）',
+      `HTTP ${publicFetch.status}`);
+    assert(dav.log.some((l) => l.method === 'GET'),
+      '后端已通过 WebDAV 协议（认证 GET）回源取文件');
+    assert(publicFetch.headers.get('content-type') === 'image/png',
+      '代理转发返回了正确的 Content-Type', publicFetch.headers.get('content-type'));
+
+    // 直接访问 WebDAV 私有入口：无认证必须被拒绝（真实地址确实未公开）
+    const davBase = `http://127.0.0.1:${DAV_PORT}/dav`;
+    const davGetBefore = dav.log.length;
+    const privateFetch = await fetch(`${davBase}/lumina/should-not-exist.png`);
+    assert(privateFetch.status === 401, '对比：WebDAV 私有路径未授权访问被拒绝',
+      `HTTP ${privateFetch.status}`);
+    assert(dav.log.length === davGetBefore, '未授权探测不会由图床代理放行');
+
+    uploadedId = item.id;
+    uploadedUrl = item.url;
 
     section('5. 远端内容一致性');
 
-    const remoteKey = puts[0].key;
     const stored = dav.files.get(remoteKey);
     assert(!!stored, '远端确实存在该文件', remoteKey);
 

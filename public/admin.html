@@ -6,7 +6,7 @@
   <title>管理台 · Lumina 图床</title>
   <meta name="robots" content="noindex, nofollow" />
   <meta name="theme-color" content="#2f6feb" />
-  <link rel="icon" href="/favicon.svg" />
+  <link rel="icon" href="/favicon.ico" />
   <link rel="stylesheet" href="/css/style.css" />
 </head>
 <body>
@@ -139,6 +139,20 @@
               </div>
 
               <div class="field">
+                <label>网站图标（favicon）</label>
+                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                  <img id="favicon-preview" src="/favicon.svg" alt="当前站点图标"
+                       width="32" height="32" style="width:32px;height:32px;border-radius:8px;
+                       border:1px solid var(--border);background:#fff;object-fit:contain;padding:2px" />
+                  <input type="file" id="favicon-input" accept=".ico,.png,.svg,.jpg,.jpeg,.gif,.webp" hidden />
+                  <button class="btn sm" type="button" id="favicon-upload">上传图标</button>
+                  <button class="btn sm ghost" type="button" id="favicon-reset" hidden>恢复默认</button>
+                </div>
+                <div class="desc" id="favicon-ext">当前使用默认图标</div>
+                <div class="desc">支持 .ico / .png / .svg / .jpg / .gif / .webp，不超过 1MB；未设置时自动使用默认图标。</div>
+              </div>
+
+              <div class="field">
                 <label>游客上传</label>
                 <label class="switch">
                   <input type="checkbox" id="s-guest-enabled" data-key="guest_upload_enabled" data-type="bool" />
@@ -209,6 +223,48 @@
               </div>
             </div>
           </div>
+
+          <div class="card section">
+            <div class="section-head">
+              <div>
+                <h3>客户端上传行为</h3>
+                <div class="desc">上传页浏览器端的处理策略，统一在此配置，前端不再展示这些开关</div>
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label>客户端转 WebP</label>
+                <label class="switch">
+                  <input type="checkbox" id="s-client-webp" data-key="client_convert_webp" data-type="bool" />
+                  <span class="track" aria-hidden="true"></span>
+                  <span>上传前在浏览器内把 JPG / PNG / BMP 转成 WebP（服务端零开销）</span>
+                </label>
+                <div class="desc">GIF 动图、SVG 矢量、AVIF 不参与转换；转换后无体积收益时自动保留原格式。</div>
+              </div>
+              <div class="field">
+                <label>客户端压缩</label>
+                <label class="switch">
+                  <input type="checkbox" id="s-client-compress" data-key="client_compress" data-type="bool" />
+                  <span class="track" aria-hidden="true"></span>
+                  <span>转换时按下方质量参数做有损压缩</span>
+                </label>
+                <div class="desc">默认关闭：仅转换格式，质量按 100 处理，不做有损压缩。</div>
+              </div>
+              <div class="field">
+                <label for="s-client-quality">WebP 质量</label>
+                <input type="number" id="s-client-quality" data-key="client_webp_quality" data-type="int" min="40" max="100" />
+                <div class="desc">40–100，越高越清晰、体积越大；仅在开启「客户端压缩」时生效。</div>
+              </div>
+              <div class="field">
+                <label>上传后自动复制直链</label>
+                <label class="switch">
+                  <input type="checkbox" id="s-autocopy" data-key="auto_copy_url" data-type="bool" />
+                  <span class="track" aria-hidden="true"></span>
+                  <span>上传完成后自动复制最后一张图的直链</span>
+                </label>
+              </div>
+            </div>
+          </div>
         </form>
       </div>
 
@@ -261,12 +317,11 @@
               <div class="desc">不存在会自动递归创建。</div>
             </div>
             <div class="field">
-              <label for="s-dav-public">直链前缀（可选）</label>
-              <input type="text" id="s-dav-public" data-key="webdav_public_url" placeholder="https://cdn.example.com/lumina" />
+              <label>直链说明</label>
               <div class="desc">
-                请填写<strong>已包含远端目录</strong>的完整前缀，直链 = 前缀 + /年月/文件名，
-                因此不要再把目录写两遍。留空则自动使用「WebDAV 地址 + 远端目录」。
-                私有网盘必须填可公网直读的地址（或 Alist 中转地址），否则访客打不开直链。
+                WebDAV 模式下所有图片直链均由本站 <code>/i/&lt;key&gt;</code> 代理路由提供：
+                访客请求时由后端通过 WebDAV 协议认证回源并转发内容，
+                <strong>不会暴露 WebDAV 真实地址</strong>，私有网盘也无需配置公网直读地址。
               </div>
             </div>
           </div>
