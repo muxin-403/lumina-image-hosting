@@ -38,6 +38,8 @@ const SCHEMA = {
   client_convert_webp: { type: 'boolean' },
   client_compress: { type: 'boolean' },
   client_webp_quality: { type: 'int', min: 40, max: 100 },
+  // 浏览器端批量上传最大并发数：1–6（HTTP/1.1 同域并发连接上限约 6，更高只会被浏览器排队）
+  client_max_concurrency: { type: 'int', min: 1, max: 6 },
   auto_copy_url: { type: 'boolean' },
   optimize: { type: 'boolean' },
   dedupe: { type: 'boolean' },

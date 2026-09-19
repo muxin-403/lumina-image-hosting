@@ -7,13 +7,14 @@
  * 用法：
  *   node examples/upload.js upload images/cat.png
  *   node examples/upload.js upload a.png b.jpg c.svg --password admin123
+ *   node examples/upload.js upload a.png b.jpg c.svg --concurrency 3 --password admin123
  *   node examples/upload.js list   --password admin123 --limit 5 --order largest
  *   node examples/upload.js stats  --password admin123
  *   node examples/upload.js delete <id> --password admin123
  *   node examples/upload.js settings --password admin123 --guest-max 8mb
  *   node examples/upload.js health
  *
- * 环境变量：LUMINA_BASE / LUMINA_PASSWORD
+ * 环境变量：LUMINA_BASE / LUMINA_PASSWORD / LUMINA_CONCURRENCY（批量上传并发数，默认 3）
  */
 
 const fs = require('fs');
@@ -78,6 +79,43 @@ async function login(password) {
   console.log(`✓ 管理员登录成功，Token 前缀 ${TOKEN.slice(0, 16)}…`);
 }
 
+/* ------------------------------ 并发控制 ------------------------------ */
+
+/**
+ * 固定并发数的任务池（mapLimit）：
+ *  - 最多 limit 个任务同时在途，每个任务的结果 / 异常按输入下标写入独立槽位，
+ *    与原文件一一对应，不依赖完成顺序
+ *  - JS 单线程事件循环内领取下标（同步自增），不会重复分配
+ *  - 单个任务失败不中断整批，错误随槽位返回
+ */
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (next < items.length) {
+      const i = next;
+      next += 1;
+      try {
+        out[i] = { ok: true, value: await fn(items[i], i) }; // eslint-disable-line no-await-in-loop
+      } catch (err) {
+        out[i] = { ok: false, error: err };
+      }
+    }
+  });
+
+  await Promise.all(workers);
+  return out;
+}
+
+/** 解析并收敛并发数：非法值回落 3，允许 1–10 */
+function resolveConcurrency(flagValue) {
+  const raw = flagValue !== undefined && flagValue !== true ? flagValue : process.env.LUMINA_CONCURRENCY;
+  const n = Math.round(Number(raw));
+  if (!Number.isFinite(n)) return 3;
+  return Math.min(10, Math.max(1, n));
+}
+
 /* ------------------------------- 业务动作 ------------------------------- */
 
 function human(bytes) {
@@ -88,38 +126,66 @@ function human(bytes) {
   return `${i === 0 ? n : n.toFixed(2)} ${units[i]}`;
 }
 
-async function upload(paths) {
+/** 上传单个文件（独立请求），返回响应中的条目数组 */
+async function uploadOne(p) {
+  if (!fs.existsSync(p)) throw new Error(`文件不存在：${p}`);
+  const buf = fs.readFileSync(p);
   const form = new FormData();
-  for (const p of paths) {
-    if (!fs.existsSync(p)) throw new Error(`文件不存在：${p}`);
-    const buf = fs.readFileSync(p);
-    form.append('file', new Blob([buf]), path.basename(p));
-  }
+  form.append('file', new Blob([buf]), path.basename(p));
 
   const payload = await api('POST', '/api/upload', { body: form });
-  const items = Array.isArray(payload.data) ? payload.data : [payload.data];
+  return Array.isArray(payload.data) ? payload.data : [payload.data];
+}
 
-  console.log(`✓ 上传成功 ${items.length} 张（失败 ${payload.failed || 0} 张）\n`);
-  for (const it of items) {
-    const flags = [];
-    if (it.vector) flags.push('矢量');
-    if (it.animated) flags.push(`动态 ${it.pages} 帧`);
-    if (it.duplicated) flags.push('秒传');
+/** 打印单张上传结果明细 */
+function printItem(it) {
+  const flags = [];
+  if (it.vector) flags.push('矢量');
+  if (it.animated) flags.push(`动态 ${it.pages} 帧`);
+  if (it.duplicated) flags.push('秒传');
 
-    const comp = it.compression || {};
-    const saved = comp.saved_bytes > 0 ? `  节省 ${comp.saved_percent}%` : '';
+  const comp = it.compression || {};
+  const saved = comp.saved_bytes > 0 ? `  节省 ${comp.saved_percent}%` : '';
 
-    console.log(`  ${it.filename}`);
-    console.log(`    直链      ${it.url}`);
-    console.log(`    详情页    ${it.page_url}`);
-    console.log(`    缩略图    ${it.thumb_url}`);
-    console.log(`    尺寸      ${it.width}×${it.height}  大小 ${it.size_human}${saved}`);
-    console.log(`    存储      ${it.storage_driver}  ${flags.join(' ')}`);
-    console.log(`    HTML      ${it.formats.html}`);
-    console.log(`    Markdown  ${it.formats.markdown}`);
-    console.log(`    BBCode    ${it.formats.bbcode}`);
-    console.log('');
-  }
+  console.log(`  ${it.filename}`);
+  console.log(`    直链      ${it.url}`);
+  console.log(`    详情页    ${it.page_url}`);
+  console.log(`    缩略图    ${it.thumb_url}`);
+  console.log(`    尺寸      ${it.width}×${it.height}  大小 ${it.size_human}${saved}`);
+  console.log(`    存储      ${it.storage_driver}  ${flags.join(' ')}`);
+  console.log(`    HTML      ${it.formats.html}`);
+  console.log(`    Markdown  ${it.formats.markdown}`);
+  console.log(`    BBCode    ${it.formats.bbcode}`);
+  console.log('');
+}
+
+/**
+ * 并发批量上传：每张图片独立请求，最多 concurrency 张同时在途（默认 3，可配 1–10）。
+ * 逐张收集结果与错误：成功按原顺序打印明细，失败单独提示文件名与原因。
+ */
+async function upload(paths, concurrency) {
+  const limit = resolveConcurrency(concurrency);
+  const outcomes = await mapLimit(paths, limit, (p) => uploadOne(p));
+
+  const items = [];
+  let okCount = 0;
+  let failCount = 0;
+
+  outcomes.forEach((r, i) => {
+    const name = path.basename(paths[i]);
+    if (r.ok) {
+      okCount += 1;
+      for (const it of r.value) {
+        items.push(it);
+        printItem(it);
+      }
+    } else {
+      failCount += 1;
+      console.error(`  ✗ ${name}：${r.error.message}`);
+    }
+  });
+
+  console.log(`✓ 上传成功 ${okCount} 张（失败 ${failCount} 张，并发 ${limit}）\n`);
   return items;
 }
 
@@ -216,7 +282,7 @@ async function main() {
       '  node examples/upload.js delete <id...> --password xxx',
       '  node examples/upload.js settings --password xxx [--guest-max 8mb] [--guest-enabled false] [--driver local]',
       '',
-      '环境变量：LUMINA_BASE=http://host:port  LUMINA_PASSWORD=xxx',
+      '环境变量：LUMINA_BASE=http://host:port  LUMINA_PASSWORD=xxx  LUMINA_CONCURRENCY=3',
     ].join('\n'));
     return;
   }
@@ -239,7 +305,7 @@ async function main() {
     case 'upload': {
       const files = _.slice(1);
       if (!files.length) throw new Error('请至少指定一个图片路径');
-      const items = await upload(files);
+      const items = await upload(files, flags.concurrency ?? flags.c);
       if (flags.json) console.log(JSON.stringify(items, null, 2));
       break;
     }

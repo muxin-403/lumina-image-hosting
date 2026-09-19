@@ -150,6 +150,8 @@ const config = {
   clientCompress: envBool('CLIENT_COMPRESS', false),
   /** 开启客户端压缩时的 WebP 质量（40–100） */
   clientWebpQuality: envInt('CLIENT_WEBP_QUALITY', 82),
+  /** 浏览器端批量上传的最大并发数（1–6；HTTP/1.1 下浏览器对同域并发连接上限约 6，设更高只会排队） */
+  clientMaxConcurrency: envInt('CLIENT_MAX_CONCURRENCY', 3),
   /** 上传完成后自动复制最后一张图的直链 */
   autoCopyUrl: envBool('AUTO_COPY_URL', false),
 

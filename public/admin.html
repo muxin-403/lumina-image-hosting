@@ -256,6 +256,11 @@
                 <div class="desc">40–100，越高越清晰、体积越大；仅在开启「客户端压缩」时生效。</div>
               </div>
               <div class="field">
+                <label for="s-client-concurrency">批量上传最大并发数</label>
+                <input type="number" id="s-client-concurrency" data-key="client_max_concurrency" data-type="int" min="1" max="6" />
+                <div class="desc">1–6，批量上传时同时在途的图片数量；HTTP/1.1 下浏览器同域并发连接约 6 条，设更高只会排队。</div>
+              </div>
+              <div class="field">
                 <label>上传后自动复制直链</label>
                 <label class="switch">
                   <input type="checkbox" id="s-autocopy" data-key="auto_copy_url" data-type="bool" />

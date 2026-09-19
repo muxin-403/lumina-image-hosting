@@ -1,6 +1,6 @@
 /* ==========================================================================
    Lumina · 上传页逻辑
-   拖拽 / 批量 / 剪贴板粘贴 → 客户端可选转 WebP → 上传 → 生成多格式引用
+   拖拽 / 批量 / 剪贴板粘贴 → 客户端可选转 WebP → 并发上传（可配最大并发数） → 生成多格式引用
    ========================================================================== */
 
 (() => {
@@ -34,6 +34,7 @@
     client_convert_webp: true,
     client_compress: false,
     client_webp_quality: 82,
+    client_max_concurrency: 3,
     auto_copy_url: false,
   };
 
@@ -195,7 +196,13 @@
     progressText.textContent = text || `${Math.round(ratio * 100)}%`;
   }
 
-  /** 串行处理整批文件：逐张转换 + 上传，进度可感知 */
+  /**
+   * 并发处理整批文件（worker 池模型）：
+   *  - 最大同时在途张数由管理台配置项 client_max_concurrency 控制（1–6，默认 3）
+   *  - 每张图片按批次下标占用独立「槽位」，结果 / 进度 / 失败信息均与原文件一一对应，
+   *    不依赖完成顺序；JS 单线程事件循环内领取下标，无竞态
+   *  - 整体进度 =（已完成数 + 在途已传比例之和）/ 总数，实时反映并发状态
+   */
   async function handleFiles(fileList) {
     const files = Array.from(fileList || []);
     if (!files.length) return;
@@ -215,23 +222,44 @@
     const quality = config.client_convert_webp && config.client_compress
       ? Math.min(100, Math.max(40, Number(config.client_webp_quality) || 82)) / 100
       : 1;
+
+    // 最大并发数：越界 / 非法配置一律回落到 1–6 区间内的安全值
+    const maxConcurrent = Math.min(6, Math.max(1, Math.round(Number(config.client_max_concurrency) || 3)));
+
+    // 槽位状态：与 batch 下标严格对应，并发下互不干扰
+    const slotItems = new Array(batch.length).fill(null); // 成功结果（数组，防御多 item 响应）
+    const slotProgress = new Array(batch.length).fill(0); // 上传进度 0–1
+    const slotDone = new Array(batch.length).fill(false); // 是否已结束（无论成败）
+
+    let nextIndex = 0; // 下一个待处理文件的下标（同步领取，无竞态）
     let okCount = 0;
     let failCount = 0;
     let savedBytes = 0;
     let lastUrl = null;
 
-    for (let i = 0; i < batch.length; i += 1) {
+    /** 聚合整体进度：已完成槽位记 1，在途槽位累加各自比例 */
+    const renderOverall = () => {
+      let done = 0;
+      let inflight = 0;
+      for (let i = 0; i < batch.length; i += 1) {
+        if (slotDone[i]) done += 1;
+        else inflight += slotProgress[i];
+      }
+      setProgress((done + inflight) / batch.length, `已完成 ${done}/${batch.length}${failCount ? ` · 失败 ${failCount}` : ''}`);
+    };
+
+    /** 处理单个文件：校验 → 可选转 WebP → 上传，结果写入自身槽位 */
+    const processOne = async (i) => {
       const raw = batch[i];
-      const label = `(${i + 1}/${batch.length})`;
 
       const invalid = checkFile(raw);
       if (invalid) {
         failCount += 1;
+        slotDone[i] = true;
         toast(`${raw.name}：${invalid}`, 'error', 4000);
-        continue;
+        renderOverall();
+        return;
       }
-
-      setProgress(i / batch.length, `${label} 处理中…`);
 
       let file = raw;
       let converted = false;
@@ -244,7 +272,8 @@
 
       try {
         const data = await uploadXHR(file, (p) => {
-          setProgress((i + p) / batch.length, `${label} ${Math.round(p * 100)}%`);
+          slotProgress[i] = p; // 仅写本槽位，不影响其它在途请求
+          renderOverall();
         });
 
         const items = Array.isArray(data) ? data : [data];
@@ -252,19 +281,45 @@
           item._clientConverted = converted;
           item._originalName = raw.name;
           item._originalSize = raw.size;
-          results.unshift(item);
         }
-        lastUrl = items[0].url;
+        slotItems[i] = items;
         okCount += 1;
+        if (items[0] && items[0].url) lastUrl = items[0].url;
       } catch (err) {
         failCount += 1;
         toast(`${raw.name}：${err.message}`, 'error', 4500);
+      } finally {
+        slotDone[i] = true;
+        slotProgress[i] = 1;
+        renderOverall();
       }
-    }
+    };
+
+    // 启动固定数量的 worker：每个 worker 循环领取下一个下标，直到队列取空。
+    // worker 数量 = min(最大并发数, 文件数)，保证单张文件时不会多开空任务。
+    const workerCount = Math.min(maxConcurrent, batch.length);
+    const workers = Array.from({ length: workerCount }, async () => {
+      while (nextIndex < batch.length) {
+        const i = nextIndex;
+        nextIndex += 1;
+        // 领取与自增在同一次同步执行中完成，事件循环保证不会重复分配
+        await processOne(i); // eslint-disable-line no-await-in-loop
+      }
+    });
+
+    // 等待全部 worker 退出；单张失败已在槽位内消化，不会中断整批
+    await Promise.all(workers);
 
     setProgress(1, '完成');
     setTimeout(() => { progress.hidden = true; progressBar.style.width = '0'; }, 700);
 
+    // 按批次顺序合并结果：从最后一个槽位向前 unshift，
+    // 使结果列表保持「先选择的文件排在最前」，与串行版体验一致
+    for (let i = batch.length - 1; i >= 0; i -= 1) {
+      const items = slotItems[i];
+      if (!items) continue; // 该槽位失败或被跳过
+      for (let j = items.length - 1; j >= 0; j -= 1) results.unshift(items[j]);
+    }
     renderResults();
 
     if (okCount) {
