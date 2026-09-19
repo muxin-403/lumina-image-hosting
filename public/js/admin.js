@@ -33,8 +33,13 @@
       $('token-display').value = store.get(TOKEN_KEY);
       showDash();
       if (me.default_password) {
-        showAlert('dash-alert', 'warn',
-          '当前仍在使用初始密码，存在安全风险。请到「存储与安全」标签页立即修改。');
+        // 带直达按钮的告警：说清风险的同时，把用户送到修改入口
+        const host = $('dash-alert');
+        host.innerHTML = `
+          <div class="alert warn">当前仍在使用初始密码，存在安全风险，建议立即修改。
+            <button class="btn sm" type="button" id="goto-storage">去修改 →</button>
+          </div>`;
+        $('goto-storage').addEventListener('click', () => activateTab('storage'));
       }
     } catch (_) {
       showLogin();
@@ -113,20 +118,22 @@
 
   /* ============================== 标签页切换 ============================== */
 
+  /** 切换到指定标签页（供 tab 点击与告警快捷跳转共用） */
+  function activateTab(target) {
+    document.querySelectorAll('.tabs-nav button[data-tab]').forEach((b) => {
+      const active = b.dataset.tab === target;
+      b.classList.toggle('active', active);
+      b.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    ['images', 'settings', 'storage'].forEach((t) => {
+      $(`tab-${t}`).hidden = t !== target;
+    });
+    if (target === 'storage') checkStorageHealth();
+  }
+
   function bindTabs() {
     document.querySelectorAll('.tabs-nav button[data-tab]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const target = btn.dataset.tab;
-        document.querySelectorAll('.tabs-nav button[data-tab]').forEach((b) => {
-          const active = b === btn;
-          b.classList.toggle('active', active);
-          b.setAttribute('aria-selected', active ? 'true' : 'false');
-        });
-        ['images', 'settings', 'storage'].forEach((t) => {
-          $(`tab-${t}`).hidden = t !== target;
-        });
-        if (target === 'storage') checkStorageHealth();
-      });
+      btn.addEventListener('click', () => activateTab(btn.dataset.tab));
     });
   }
 
@@ -137,7 +144,8 @@
       const s = await request('/api/images/stats');
       const formats = (s.byExt || [])
         .map((f) => `${f.ext.toUpperCase()} ${f.count}`)
-        .join(' · ') || '—';
+        .join(' · ');
+      const DRIVER_TEXT = { local: '本地磁盘', webdav: 'WebDAV 网盘', hybrid: '本地 + WebDAV 双写' };
 
       $('stats').innerHTML = `
         <div class="card stat">
@@ -148,23 +156,24 @@
         <div class="card stat">
           <div class="label">占用空间</div>
           <div class="value">${escapeHtml(s.total_human)}</div>
-          <div class="sub">存储驱动：${(s.byDriver || []).map((d) => d.driver).join(' + ') || '—'}</div>
+          <div class="sub">存储方式：${(s.byDriver || []).map((d) => DRIVER_TEXT[d.driver] || d.driver).join(' + ') || '—'}</div>
         </div>
         <div class="card stat">
           <div class="label">今日上传</div>
           <div class="value">${s.todayCount}</div>
-          <div class="sub">${escapeHtml(s.today_bytes_human)}</div>
+          <div class="sub">${s.todayCount ? escapeHtml(s.today_bytes_human) : '今日暂无上传'}</div>
         </div>
         <div class="card stat">
           <div class="label">格式分布</div>
-          <div class="value" style="font-size:14px;line-height:1.7;font-weight:600">${escapeHtml(formats)}</div>
+          <div class="value clamp" style="font-size:14px;line-height:1.7;font-weight:600"
+               title="${escapeHtml(formats || '—')}">${escapeHtml(formats || '—')}</div>
         </div>`;
 
       // 动态填充格式筛选下拉框
       const extSelect = $('filter-ext');
       const current = extSelect.value;
       extSelect.innerHTML =
-        '<option value="">全部格式</option>' +
+        '<option value="">全部</option>' +
         (s.byExt || [])
           .map((f) => `<option value="${escapeHtml(f.ext)}">${escapeHtml(f.ext.toUpperCase())} (${f.count})</option>`)
           .join('');
@@ -236,7 +245,8 @@
           <td class="actions-cell">
             <button class="btn sm ghost" type="button" data-act="copy" data-id="${escapeHtml(it.id)}">复制链接</button>
             <a class="btn sm ghost" href="${escapeHtml(it.url)}" target="_blank" rel="noopener">查看</a>
-            <button class="btn sm danger" type="button" data-act="delete" data-id="${escapeHtml(it.id)}">删除</button>
+            <button class="btn sm ghost row-delete" type="button" data-act="delete" data-id="${escapeHtml(it.id)}"
+                    title="删除这张图片（不可恢复）">删除</button>
           </td>
         </tr>`,
         )
@@ -274,7 +284,7 @@
       if (!item) return;
 
       if (act === 'copy') {
-        copyWithToast(item.url, '直链已复制');
+        copyWithToast(item.url, '链接已复制');
       } else if (act === 'delete') {
         if (!confirm(`确定删除「${item.filename}」吗？\n\n此操作会同时删除存储中的文件，且不可恢复。`)) return;
         try {
@@ -318,7 +328,7 @@
     $('copy-selected').addEventListener('click', () => {
       const urls = state.items.filter((i) => state.selected.has(i.id)).map((i) => i.url);
       if (!urls.length) return toast('没有可复制的内容', 'info');
-      copyWithToast(urls.join('\n'), `已复制 ${urls.length} 条直链`);
+      copyWithToast(urls.join('\n'), `已复制 ${urls.length} 条链接`);
     });
 
     $('delete-selected').addEventListener('click', async () => {
@@ -514,8 +524,10 @@
     $('settings-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const btn = $('save-settings');
+      const floatBtn = $('save-settings-float');
       btn.disabled = true;
       btn.textContent = '保存中…';
+      if (floatBtn) { floatBtn.disabled = true; floatBtn.textContent = '保存中…'; }
       try {
         const body = collect($('settings-form'));
         const res = await request('/api/settings', { method: 'PATCH', body });
@@ -532,6 +544,7 @@
       } finally {
         btn.disabled = false;
         btn.textContent = '保存设置';
+        if (floatBtn) { floatBtn.disabled = false; floatBtn.textContent = '保存设置'; }
       }
     });
 

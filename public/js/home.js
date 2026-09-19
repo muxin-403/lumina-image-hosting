@@ -51,7 +51,7 @@
   /** 任务状态 -> 卡片上的中文说明 */
   const STATE_TEXT = {
     queued: '排队中',
-    converting: '浏览器内转码',
+    converting: '正在转换格式',
     uploading: '上传中',
     failed: '上传失败',
     canceled: '已取消',
@@ -80,26 +80,22 @@
       fileInput.setAttribute('accept', (config.allowed_formats || ['image/*']).map((e) => `.${e}`).join(','));
 
       const limiter = config.guest_upload_enabled
-        ? `游客单文件 ≤ ${formatSize(config.guest_max_file_size)} · 单次 ≤ ${config.max_files} 个`
-        : '本站已关闭游客上传，仅管理员可上传';
+        ? `单张 ≤ ${formatSize(config.guest_max_file_size)}，一次最多 ${config.max_files} 张`
+        : '当前仅管理员可上传，请先在管理台登录';
       $('limit-hint').textContent = limiter;
 
       // 展示管理台下发的客户端处理策略（前端无开关，仅提示）
-      const policy = [];
-      if (config.client_convert_webp) {
-        policy.push(config.client_compress
-          ? `客户端转 WebP（质量 ${config.client_webp_quality}）`
-          : '客户端转 WebP（不压缩）');
-      }
       const policyEl = $('client-policy-hint');
       if (policyEl) {
-        policyEl.textContent = policy.length ? `${policy.join('，')} · 策略由管理台配置` : '';
-        policyEl.hidden = policy.length === 0;
+        policyEl.textContent = config.client_convert_webp
+          ? '上传时自动转为 WebP 以减小体积（管理员可在后台关闭）'
+          : '';
+        policyEl.hidden = !config.client_convert_webp;
       }
 
       if (!config.guest_upload_enabled) {
         dz.style.opacity = '.7';
-        toast('本站已关闭游客上传，请登录管理员后再上传', 'error', 5000);
+        toast('当前仅管理员可上传，请先在管理台登录', 'error', 5000);
       }
     } catch (err) {
       toast(`读取站点配置失败：${err.message}`, 'error');
@@ -235,17 +231,17 @@
   function cardHtml(task) {
     const done = task.state === 'done';
 
-    /* --- 状态徽标 --- */
+    /* --- 状态徽标（并入 meta 行，减少一个独立层级） --- */
     const badge = [];
     if (done) {
       const item = task.item;
-      if (item.vector) badge.push('<span class="badge info">矢量</span>');
-      if (item.animated) badge.push(`<span class="badge info">动态 ${item.pages} 帧</span>`);
-      if (item._clientConverted) badge.push('<span class="badge ok">客户端转 WebP</span>');
+      if (item.vector) badge.push('<span class="badge info">矢量图（SVG）</span>');
+      if (item.animated) badge.push(`<span class="badge info">动图（${item.pages} 帧）</span>`);
+      if (item._clientConverted) badge.push('<span class="badge ok">已转 WebP 省空间</span>');
       if (item.compression && item.compression.saved_bytes > 0) {
-        badge.push(`<span class="badge ok">优化 −${item.compression.saved_percent}%</span>`);
+        badge.push(`<span class="badge ok">已压缩 −${item.compression.saved_percent}%</span>`);
       }
-      if (item.duplicated) badge.push('<span class="badge warn">内容重复（秒传）</span>');
+      if (item.duplicated) badge.push('<span class="badge warn">与已有图片相同，已复用原文件</span>');
     } else if (task.state === 'failed') {
       badge.push('<span class="badge warn">上传失败</span>');
     } else {
@@ -263,8 +259,10 @@
             <span>${escapeHtml(done ? task.item.filename : task.name)}</span>
             ${removeButtonHtml(task)}
           </div>
-          ${done ? doneMetaHtml(task.item) : pendingMetaHtml(task)}
-          <div class="badges">${badge.join('')}</div>
+          <div class="meta">
+            ${done ? doneMetaInner(task.item) : pendingMetaInner(task)}
+            <span class="badges">${badge.join('')}</span>
+          </div>
           ${done ? formatsHtml(task) : taskLineHtml(task)}
         </div>
       </article>`;
@@ -296,42 +294,43 @@
         aria-label="${escapeHtml(`${title}：${task.name}`)}">${label}</button>`;
   }
 
-  function doneMetaHtml(item) {
+  /** 完成后的 meta 信息（尺寸 / 体积 / 格式 / 时间，弱化为次要信息行） */
+  function doneMetaInner(item) {
     return `
-      <div class="meta">
-        <span>${item.width || '?'} × ${item.height || '?'}</span>
-        <span>${escapeHtml(item.size_human || formatSize(item.size))}</span>
-        <span>${escapeHtml(String(item.ext).toUpperCase())}</span>
-        <span>${escapeHtml(new Date(item.created_at).toLocaleString('zh-CN', { hour12: false }))}</span>
-      </div>`;
+      <span>${item.width || '?'} × ${item.height || '?'}</span>
+      <span>${escapeHtml(item.size_human || formatSize(item.size))}</span>
+      <span>${escapeHtml(String(item.ext).toUpperCase())}</span>
+      <span>${escapeHtml(new Date(item.created_at).toLocaleString('zh-CN', { hour12: false }))}</span>`;
   }
 
-  function pendingMetaHtml(task) {
+  function pendingMetaInner(task) {
     const ext = extOf(task.name);
     const converted = task.converted ? '<span class="badge ok">已转 WebP</span>' : '';
     return `
-      <div class="meta">
-        <span>${escapeHtml(formatSize(task.size))}</span>
-        ${ext ? `<span>${escapeHtml(ext.toUpperCase())}</span>` : ''}
-        ${converted}
-      </div>`;
+      <span>${escapeHtml(formatSize(task.size))}</span>
+      ${ext ? `<span>${escapeHtml(ext.toUpperCase())}</span>` : ''}
+      ${converted}`;
   }
 
-  /** 单张进度条 + 失败原因 */
+  /**
+   * 进行中的单张进度条；失败态不再显示进度条（它已无信息量），
+   * 直接突出「失败原因」，让用户第一时间看到该做什么。
+   */
   function taskLineHtml(task) {
+    if (task.state === 'failed') {
+      return `<div class="task-note error">失败原因：${escapeHtml(task.error || '上传失败，请重试')}</div>`;
+    }
+
     const indeterminate = INDETERMINATE.includes(task.state);
     const pct = Math.round((task.progress || 0) * 100);
-    const note = task.state === 'failed'
-      ? `<div class="task-note error">${escapeHtml(task.error || '上传失败')}</div>`
-      : '';
 
     return `
       <div class="task-line">
         <div class="task-progress${indeterminate ? ' is-indeterminate' : ''}" role="progressbar"
              aria-valuemin="0" aria-valuemax="100"${indeterminate ? '' : ` aria-valuenow="${pct}"`}
              aria-label="${escapeHtml(`${task.name} 上传进度`)}"><i style="width:${pct}%"></i></div>
-        <span class="task-pct">${indeterminate ? '—' : `${pct}%`}</span>
-      </div>${note}`;
+        <span class="task-pct">${indeterminate ? '···' : `${pct}%`}</span>
+      </div>`;
   }
 
   /** 完成后的多格式引用区 */
@@ -355,7 +354,7 @@
               : `<input readonly data-field="${task.uid}" value="${escapeHtml(first)}" />`
           }
           <button class="btn primary sm" type="button" data-copy="${task.uid}">复制</button>
-          <a class="btn sm" href="${escapeHtml(item.url)}" target="_blank" rel="noopener">打开</a>
+          <a class="btn sm ghost" href="${escapeHtml(item.url)}" target="_blank" rel="noopener">打开</a>
           <a class="btn sm ghost" href="/d/${escapeHtml(item.id)}" title="下载原图">下载</a>
         </div>
       </div>`;
@@ -369,7 +368,7 @@
 
   const cardOf = (uid) => resultList.querySelector(`.result[data-uid="${uid}"]`);
 
-  /** 列表头部（数量 / 在途张数）与空状态的同步 */
+  /** 列表头部（数量 / 在途张数）、空状态与批量按钮可用性的同步 */
   function syncListChrome() {
     const has = tasks.length > 0;
     resultsSection.hidden = !has;
@@ -378,7 +377,16 @@
 
     const inflight = tasks.filter(isInflight).length;
     queueStatus.hidden = inflight === 0;
-    queueStatus.textContent = inflight ? `${inflight} 张上传中` : '';
+    queueStatus.textContent = inflight
+      ? `${inflight} 张上传中 · 已完成 ${tasks.filter((t) => t.state === 'done').length} 张`
+      : '';
+
+    // 没有任何完成项时弱化批量操作按钮，点击会给出解释而不是无响应
+    const hasDone = tasks.some((t) => t.state === 'done' && t.item);
+    ['copy-all-url', 'copy-all-md', 'copy-all-bbcode', 'download-urls'].forEach((id) => {
+      const el = $(id);
+      if (el) el.setAttribute('aria-disabled', hasDone ? 'false' : 'true');
+    });
   }
 
   /** 批量插入新任务卡片（一次重排，避免逐张插入的抖动） */
@@ -580,13 +588,13 @@
     if (!wasDone) {
       toast(`${task.name}：已取消该上传任务`, 'info', 2400);
     } else if (cleanup.deleted) {
-      toast(`${task.name}：已删除（含服务端原图与缩略图）`, 'success', 3000);
+      toast(`${task.name}：已删除（含服务器上的原图与缩略图）`, 'success', 3000);
     } else if (cleanup.reason === 'duplicated') {
-      toast(`${task.name}：已从列表移除（内容为秒传复用，服务端文件保留）`, 'info', 3600);
+      toast(`${task.name}：已移除；图片来自内容复用，服务器原件保留`, 'info', 3600);
     } else if (!cleanup.attempted) {
-      toast(`${task.name}：已从列表移除（无删除凭证，服务端文件保留）`, 'info', 3600);
+      toast(`${task.name}：已移除；没有删除权限，服务器图片保留`, 'info', 3600);
     } else {
-      toast(`${task.name}：已从列表移除，但服务端删除失败：${cleanup.message}`, 'error', 4500);
+      toast(`${task.name}：已移除，但服务器删除失败：${cleanup.message}`, 'error', 4500);
     }
   }
 
@@ -631,7 +639,7 @@
     if (!files.length) return;
 
     if (!config.guest_upload_enabled) {
-      toast('本站已关闭游客上传', 'error');
+      toast('当前仅管理员可上传', 'error');
       return;
     }
 
@@ -684,7 +692,7 @@
       );
     }
     if (doneTasks.length && config.auto_copy_url) {
-      copyWithToast(doneTasks[doneTasks.length - 1].item.url, '直链已复制到剪贴板');
+      copyWithToast(doneTasks[doneTasks.length - 1].item.url, '链接已复制到剪贴板');
     }
   }
 
@@ -811,27 +819,45 @@
       }
     });
 
-    $('copy-all-url').addEventListener('click', () => {
+    // 「更多」下拉里的按钮点击后自动收起，避免遮挡列表
+    document.querySelectorAll('.results-head .menu-list button').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const menu = btn.closest('details.menu');
+        if (menu) menu.open = false;
+      });
+    });
+
+    // 批量操作：没有完成项时给出解释，绝不静默无反应
+    const requireDone = () => {
       const items = doneItems();
-      if (!items.length) return;
-      copyWithToast(items.map((r) => r.url).join('\n'), `已复制 ${items.length} 条直链`);
+      if (!items.length) {
+        toast('还没有上传完成的图片，等上传完成后再试', 'info', 2800);
+        return null;
+      }
+      return items;
+    };
+
+    $('copy-all-url').addEventListener('click', () => {
+      const items = requireDone();
+      if (!items) return;
+      copyWithToast(items.map((r) => r.url).join('\n'), `已复制 ${items.length} 条链接`);
     });
 
     $('copy-all-md').addEventListener('click', () => {
-      const items = doneItems();
-      if (!items.length) return;
+      const items = requireDone();
+      if (!items) return;
       copyWithToast(items.map((r) => r.formats.markdown).join('\n'), `已复制 ${items.length} 条 Markdown`);
     });
 
     $('copy-all-bbcode').addEventListener('click', () => {
-      const items = doneItems();
-      if (!items.length) return;
+      const items = requireDone();
+      if (!items) return;
       copyWithToast(items.map((r) => r.formats.bbcode).join('\n'), `已复制 ${items.length} 条 BBCode`);
     });
 
     $('download-urls').addEventListener('click', () => {
-      const items = doneItems();
-      if (!items.length) return;
+      const items = requireDone();
+      if (!items) return;
       const lines = [
         `# Lumina 图床导出 · ${new Date().toLocaleString('zh-CN', { hour12: false })}`,
         `# 共 ${items.length} 张`,
@@ -839,7 +865,7 @@
         ...items.map((r) => `${r.url}\t${r.filename}\t${r.width}x${r.height}\t${r.size_human}`),
       ];
       downloadText('lumina-urls.txt', lines.join('\n'));
-      toast('已导出 URL 列表', 'success');
+      toast(`已导出 ${items.length} 条链接列表`, 'success');
     });
 
     $('clear-results').addEventListener('click', () => {

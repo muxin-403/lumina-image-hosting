@@ -35,7 +35,7 @@
   <main id="main" class="wrap">
     <section class="hero">
       <h1>拖进来，就上传</h1>
-      <p>拖拽文件、批量选择，或直接 <kbd>Ctrl</kbd>+<kbd>V</kbd> 粘贴截图 —— 立即拿到多种格式的图片直链</p>
+      <p>拖拽、批量选择、剪贴板粘贴 —— 立即拿到多种格式的图片链接</p>
     </section>
 
     <section class="card" aria-label="上传区">
@@ -69,12 +69,17 @@
           <span class="hint" id="queue-status" hidden role="status" aria-live="polite"></span>
         </h2>
         <div class="actions">
-          <button class="btn sm" type="button" id="copy-all-url">复制全部直链</button>
-          <button class="btn sm" type="button" id="copy-all-md">复制全部 Markdown</button>
-          <button class="btn sm" type="button" id="copy-all-bbcode">复制全部 BBCode</button>
-          <button class="btn sm" type="button" id="download-urls">导出列表</button>
+          <button class="btn sm" type="button" id="copy-all-url">复制全部链接</button>
+          <details class="menu">
+            <summary class="btn sm" aria-label="更多批量操作">更多 ▾</summary>
+            <div class="menu-list">
+              <button type="button" id="copy-all-md">复制 Markdown</button>
+              <button type="button" id="copy-all-bbcode">复制 BBCode（论坛用）</button>
+              <button type="button" id="download-urls" title="下载包含全部链接与图片信息的 .txt 文件">导出链接列表（.txt）</button>
+            </div>
+          </details>
           <button class="btn sm ghost" type="button" id="clear-results"
-                  title="仅清空本页列表，不会删除服务器上的图片">清空列表</button>
+                  title="仅清空本页列表，不会删除服务器上的图片">清空列表（不删图片）</button>
         </div>
       </div>
       <div class="result-list" id="result-list"></div>
@@ -92,7 +97,7 @@
   </main>
 
   <footer class="foot">
-    Lumina 图床 · 由 <code>Node.js + Express + SQLite + Sharp</code> 驱动 · 前端零框架
+    Lumina 图床 · 开源自托管项目
   </footer>
 
   <script src="/js/common.js"></script>

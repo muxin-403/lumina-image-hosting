@@ -253,8 +253,8 @@ async function main() {
 
   assert(/\/i\/\d{4}\/\d{2}\/[A-Za-z0-9_-]+\.webp$/.test(rJpg.url),
     'JPEG 在客户端转为 WebP 后才上传（直链后缀为 .webp）', rJpg.url);
-  assert(rJpg.card && /客户端转 WebP/.test(rJpg.card.textContent),
-    '结果卡片标注「客户端转 WebP」徽标');
+  assert(rJpg.card && /已转 WebP/.test(rJpg.card.textContent),
+    '结果卡片标注「已转 WebP 省空间」徽标');
 
   const head = await fetch(rJpg.url, { method: 'HEAD' });
   assert((head.headers.get('content-type') || '').includes('image/webp'),
@@ -292,8 +292,8 @@ async function main() {
 
   assert(/\.jpg$/.test(rUnsupported.url),
     '浏览器不支持 createImageBitmap 时按原格式上传（无开关、无报错）', rUnsupported.url);
-  assert(!/客户端转 WebP/.test(rUnsupported.card ? rUnsupported.card.textContent : ''),
-    '不支持场景下不显示「客户端转 WebP」徽标');
+  assert(!/已转 WebP/.test(rUnsupported.card ? rUnsupported.card.textContent : ''),
+    '不支持场景下不显示「已转 WebP」徽标');
   pw.window.close();
 
   /* ------------------------- 4. 管理台 ------------------------- */

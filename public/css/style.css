@@ -127,7 +127,7 @@ h1, h2, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -0.01em; line-heig
 .wrap { max-width: 1080px; margin: 0 auto; padding: 30px 20px 80px; }
 .wrap.wide { max-width: 1280px; }
 
-.hero { text-align: center; margin: 14px 0 26px; }
+.hero { text-align: center; margin: 6px 0 22px; }
 .hero h1 { font-size: clamp(25px, 4vw, 34px); }
 .hero p { margin: 10px 0 0; color: var(--text-soft); font-size: 15px; }
 
@@ -159,6 +159,28 @@ h1, h2, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -0.01em; line-heig
 .btn.ghost { border-color: transparent; background: transparent; color: var(--text-soft); }
 .btn.ghost:hover { background: var(--bg-soft); color: var(--text); }
 .btn.sm { padding: 5px 10px; font-size: 13px; border-radius: 7px; }
+/* 批量操作按钮在「无完成项」时用 aria-disabled 弱化（保留可点击，点击给出解释） */
+.btn[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
+
+/* ============================== 「更多」下拉 ============================== */
+
+.menu { position: relative; }
+.menu summary { list-style: none; }
+.menu summary::-webkit-details-marker { display: none; }
+.menu[open] summary { background: var(--bg-soft); }
+.menu-list {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 30;
+  min-width: 200px; padding: 6px;
+  display: flex; flex-direction: column; gap: 2px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; box-shadow: var(--shadow-lg);
+}
+.menu-list button {
+  padding: 8px 10px; border: 0; border-radius: 7px; text-align: left;
+  background: transparent; color: var(--text); font: inherit; font-size: 13px;
+  cursor: pointer; white-space: nowrap;
+}
+.menu-list button:hover { background: var(--bg-soft); }
 
 /* ============================== 上传区 ============================== */
 
@@ -235,7 +257,8 @@ h1, h2, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -0.01em; line-heig
 }
 
 .task-note { font-size: 12.5px; color: var(--text-muted); margin-top: 8px; }
-.task-note.error { color: var(--danger); }
+/* 失败原因优先于一切：失败态不再显示进度条，错误行是卡片里唯一的信息 */
+.task-note.error { color: var(--danger); font-size: 13.5px; font-weight: 550; margin-top: 10px; line-height: 1.55; }
 
 /* 单张删除：任何状态下都可用（进行中 = 取消该任务，已完成 = 连同服务端资源一起清理） */
 .btn.task-remove {
@@ -271,8 +294,9 @@ h1, h2, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -0.01em; line-heig
   font-weight: 600; font-size: 14.5px; word-break: break-all;
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
 }
-.result .meta { color: var(--text-muted); font-size: 12.5px; margin-top: 5px; display: flex; gap: 12px; flex-wrap: wrap; }
-.result .badges { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.result .meta { color: var(--text-muted); font-size: 12.5px; margin-top: 5px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+/* 徽标并入 meta 行末尾，不再单独占一行 */
+.result .badges { display: inline-flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 
 .badge {
   font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 99px;
@@ -317,6 +341,9 @@ tbody tr:last-child td { border-bottom: 0; }
 td.thumb-cell img { width: 54px; height: 54px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-soft); display: block; }
 td.name-cell { max-width: 260px; word-break: break-all; font-weight: 550; }
 td.actions-cell { white-space: nowrap; text-align: right; }
+/* 单行删除降为悬停警示：平时与其它操作同权重，悬停才显红色，降低误触与视觉噪音 */
+.btn.row-delete { color: var(--text-soft); }
+.btn.row-delete:hover { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
 .mono { font-family: var(--mono); font-size: 12.5px; color: var(--text-soft); }
 
 /* ============================== 表单 ============================== */
@@ -366,6 +393,12 @@ td.actions-cell { white-space: nowrap; text-align: right; }
 .section-head h3 { font-size: 16px; }
 .section-head .desc { color: var(--text-muted); font-size: 12.5px; margin-top: 3px; }
 
+/* 设置页常驻保存按钮：改到下方卡片时无需滚回顶部（表单属性提交同一个 settings-form） */
+#save-settings-float {
+  position: fixed; right: 26px; bottom: 26px; z-index: 60;
+  box-shadow: var(--shadow-lg);
+}
+
 /* ============================== 统计卡片 ============================== */
 
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin-bottom: 20px; }
@@ -373,11 +406,19 @@ td.actions-cell { white-space: nowrap; text-align: right; }
 .stat .label { font-size: 12.5px; color: var(--text-muted); }
 .stat .value { font-size: 25px; font-weight: 700; letter-spacing: -0.02em; margin-top: 4px; font-variant-numeric: tabular-nums; }
 .stat .sub { font-size: 12px; color: var(--text-muted); margin-top: 3px; }
+/* 「格式分布」等长内容：最多两行，完整内容放悬浮提示 */
+.stat .value.clamp {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; word-break: break-all;
+}
 
 /* ============================== 工具栏 ============================== */
 
 .toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
 .toolbar .grow { flex: 1; min-width: 170px; }
+/* 筛选行：给每个下拉一个可见的前缀标签，无需点开就能知道用途 */
+.toolbar.filters { margin-bottom: 16px; }
+.tool-label { font-size: 12.5px; color: var(--text-muted); white-space: nowrap; }
 .toolbar input[type="search"], .toolbar select {
   padding: 9px 12px; font: inherit; font-size: 13.5px;
   border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
@@ -449,6 +490,8 @@ input[type="checkbox"].row-check { width: 16px; height: 16px; accent-color: var(
   .brand small { display: none; }
   .section { padding: 16px 15px; }
   .options { gap: 10px 16px; }
+  #save-settings-float { right: 14px; bottom: 14px; }
+  .menu-list { min-width: 170px; }
 }
 
 @media print {
