@@ -344,6 +344,7 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
     "client_convert_webp": true,
     "client_compress": false,
     "client_webp_quality": 82,
+    "client_max_concurrency": 3,
     "auto_copy_url": false,
     "thumbnail_width": 480,
     "storage_driver": "local",
@@ -371,6 +372,7 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
 | client_convert_webp | bool | — | 浏览器端转 WebP（默认开启，开关在管理台配置） |
 | client_compress | bool | — | 浏览器端有损压缩（默认关闭：仅转格式） |
 | client_webp_quality | int | 40–100 | 客户端 WebP 质量，仅开启 `client_compress` 时生效 |
+| client_max_concurrency | int | 1–6 | 浏览器端批量上传最大并发数（默认 3），由上传页读取后并行上传 |
 | auto_copy_url | bool | — | 上传完成后自动复制直链 |
 | optimize | bool | — | 是否服务端再压缩 |
 | optimize_quality | int | 30–100 | 压缩质量 |
