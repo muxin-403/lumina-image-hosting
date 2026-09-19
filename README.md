@@ -320,8 +320,8 @@ image-hosting/
 `url` · `thumbnail` · `html` · `html_thumb`（缩略图包在链接里，点击看原图）·
 `markdown` · `markdown_thumb` · `bbcode` · `bbcode_thumb`
 
-前端只提供 Tab 切换 + 一键复制，另有「复制全部直链 / 复制全部 Markdown / 导出列表」，
-批量场景下省掉逐个复制的机械操作。
+前端只提供 Tab 切换 + 一键复制，另有「复制全部链接」与「更多 ▾」下拉
+（Markdown / BBCode / 导出链接列表 .txt），批量场景下省掉逐个复制的机械操作。
 
 ### 4.8 热配置：改完即生效
 
