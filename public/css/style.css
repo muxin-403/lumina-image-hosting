@@ -199,12 +199,51 @@ h1, h2, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -0.01em; line-heig
 .options .spacer { flex: 1; }
 .options .hint { color: var(--text-muted); font-size: 12.5px; }
 
-/* ============================== 进度条 ============================== */
+/* ========================== 上传任务（逐张进度） ========================== */
 
-.progress { display: flex; align-items: center; gap: 12px; padding: 12px 18px; border-top: 1px solid var(--border); }
-.progress .bar { flex: 1; height: 7px; border-radius: 99px; background: var(--bg-soft); overflow: hidden; }
-.progress .bar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--brand), #57c2ff); transition: width .2s; }
-.progress .txt { font-size: 12.5px; color: var(--text-soft); font-variant-numeric: tabular-nums; min-width: 92px; text-align: right; }
+/* 进行中 / 失败的任务与结果卡片共用两栏布局，靠左侧色条区分状态 */
+.result.is-pending { box-shadow: var(--shadow-sm), inset 3px 0 0 var(--brand); }
+.result.is-failed { box-shadow: var(--shadow-sm), inset 3px 0 0 var(--danger); }
+.result.is-pending .thumb img,
+.result.is-failed .thumb img { opacity: .92; }
+
+/* 单张进度条 */
+.task-line { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.task-progress {
+  flex: 1; min-width: 0; height: 6px; border-radius: 99px;
+  background: var(--bg-soft); overflow: hidden;
+}
+.task-progress i {
+  display: block; height: 100%; width: 0; border-radius: inherit;
+  background: linear-gradient(90deg, var(--brand), #57c2ff);
+  transition: width .18s ease;
+}
+/* 尚未产生可计算的进度（排队 / 浏览器内转码）时走不确定态动画 */
+.task-progress.is-indeterminate i {
+  width: 36% !important;
+  animation: task-slide 1.05s ease-in-out infinite;
+}
+@keyframes task-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(280%); }
+}
+.result.is-failed .task-progress i { background: var(--danger); }
+
+.task-pct {
+  font-size: 12.5px; color: var(--text-soft); font-variant-numeric: tabular-nums;
+  min-width: 40px; text-align: right;
+}
+
+.task-note { font-size: 12.5px; color: var(--text-muted); margin-top: 8px; }
+.task-note.error { color: var(--danger); }
+
+/* 单张删除：任何状态下都可用（进行中 = 取消该任务，已完成 = 连同服务端资源一起清理） */
+.btn.task-remove {
+  margin-left: auto; border-color: transparent; background: transparent;
+  color: var(--text-muted); flex: none;
+}
+.btn.task-remove:hover { background: var(--danger-soft); color: var(--danger); }
+.btn.task-remove[disabled] { cursor: progress; }
 
 /* ============================== 结果区 ============================== */
 

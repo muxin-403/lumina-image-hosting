@@ -16,6 +16,7 @@ const { Images, Settings } = require('../db');
 const { settings, storageManager } = require('./settings');
 const { processImage } = require('./image');
 const { shortId, dateShard, safeBaseName, ApiError, logger } = require('../utils');
+const { computeDeleteKey } = require('../utils/deleteKey');
 
 /** 存储路径：yyyy/mm/<id>.<ext> */
 function buildKey(id, ext, date = new Date()) {
@@ -129,7 +130,9 @@ async function storeFile({ file, isAdmin, clientIp = '', ua = '', req }) {
     const exist = Images.findBySha(result.sha256);
     if (exist) {
       logger.info(`命中秒传 ${exist.id} <- ${file.originalname}`);
-      return { dto: toDTO(exist, base), duplicated: true, optimized: result };
+      // 秒传复用的是别人先创建的记录，因此不下发删除凭证：
+      // 否则后上传者就能凭凭证删掉先上传者的图片
+      return { dto: { ...toDTO(exist, base), delete_key: null }, duplicated: true, optimized: result };
     }
   }
 
@@ -184,7 +187,11 @@ async function storeFile({ file, isAdmin, clientIp = '', ua = '', req }) {
     storage: putResult.results,
   });
 
-  return { dto: toDTO(row, base), duplicated: false, optimized: result };
+  const dto = toDTO(row, base);
+  // 仅本次新建的记录签发删除凭证：前端凭它即可清理自己刚上传的这一张
+  dto.delete_key = computeDeleteKey(row.id, row.sha256);
+
+  return { dto, duplicated: false, optimized: result };
 }
 
 /**

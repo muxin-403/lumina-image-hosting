@@ -6,10 +6,10 @@
  * 用 jsdom 真实加载上传页与管理台，执行其中的脚本，捕获任何运行时异常，
  * 并驱动一次真实上传与一次真实登录，验证界面确实渲染出了内容。
  *
- * 覆盖 5 个部分：
+ * 覆盖 6 个部分：
  *   1. 上传页加载与初始化          2. 真实上传流程与多格式引用
  *   3. 客户端 WebP 转换（核心需求）  4. 管理台登录与控制台渲染
- *   5. 管理台配置表单与存储自检
+ *   5. 管理台配置表单与存储自检      6. 上传列表逐张进度与单张删除
  *
  * 第 3 部分为 jsdom 注入了 Canvas / createImageBitmap 的替身，用于端到端
  * 验证「浏览器内转 WebP」这条核心链路，包括 GIF/SVG/AVIF 的跳过规则与
@@ -126,6 +126,10 @@ async function main() {
 
   assert(D.title.includes('Lumina') || D.title.includes('图床'), '页面标题已按站点名设置', D.title);
 
+  // 统一总进度条已被「逐张进度」取代
+  assert(D.querySelector('#progress') === null, '统一总进度条已移除（改为逐张独立进度）');
+  assert(D.querySelector('#queue-status') !== null, '上传列表提供在途任务计数位');
+
   // 剪贴板粘贴监听
   const before = D.querySelectorAll('.result').length;
   assert(before === 0, '初始状态无上传结果卡片');
@@ -145,14 +149,14 @@ async function main() {
   Object.defineProperty(input, 'files', { value: [file], writable: false, configurable: true });
   input.dispatchEvent(new W.Event('change', { bubbles: true }));
 
-  // 等待 XHR 上传完成并渲染
+  // 上传一开始就会插入任务卡片，这里等这张卡片升级为「完成」态
   for (let i = 0; i < 40; i += 1) {
-    if (D.querySelectorAll('.result').length > 0) break;
+    if (D.querySelectorAll('.result[data-state="done"]').length > 0) break;
     await sleep(250);
   }
 
   const cards = D.querySelectorAll('.result');
-  assert(cards.length === 1, '上传结果卡片已渲染', `${cards.length} 张`);
+  assert(cards.length === 1, '上传任务卡片已渲染', `${cards.length} 张`);
 
   if (cards.length) {
     const card = cards[0];
@@ -209,18 +213,24 @@ async function main() {
       cb(new win.Blob([new Uint8Array(realWebp)], { type: mime }));
   }
 
-  /** 驱动 file input 触发一次上传，返回新增结果卡片的直链 */
+  /**
+   * 驱动 file input 触发一次上传，返回本次新增的那张完成卡片及其直链。
+   * 用 uid 差集定位新卡片：任务卡片是追加到列表末尾的，不能再默认取第一个。
+   */
   async function pickAndUpload(win, doc, file) {
-    const before = doc.querySelectorAll('.result').length;
+    const before = new Set([...doc.querySelectorAll('.result')].map((el) => el.dataset.uid));
+    const freshCard = () =>
+      [...doc.querySelectorAll('.result[data-state="done"]')].find((el) => !before.has(el.dataset.uid)) || null;
+
     const input = doc.querySelector('#file-input');
     Object.defineProperty(input, 'files', { value: [file], writable: false, configurable: true });
     input.dispatchEvent(new win.Event('change', { bubbles: true }));
 
     for (let i = 0; i < 48; i += 1) {
-      if (doc.querySelectorAll('.result').length > before) break;
+      if (freshCard()) break;
       await sleep(250);
     }
-    const card = doc.querySelector('.result');
+    const card = freshCard();
     if (!card) return { card: null, url: '' };
     const field = card.querySelector('[data-field]');
     return { card, url: field ? field.value || field.textContent : '' };
@@ -415,7 +425,135 @@ async function main() {
   assert(AD.querySelector('#token-display').value.startsWith('ey'),
     '管理 Token 已展示在界面中（供脚本化调用）');
 
+  // 留住 Token：第 6 部分要用它把环境调到确定状态，再验证删除链路
+  const adminToken = AW.localStorage.getItem('lumina_token');
+  assert(!!adminToken, '已取得管理员 Token（供后续用例构造确定性环境）');
+
   AW.close();
+
+  /* ------------ 6. 上传列表：逐张进度与单张删除（本次新增能力） ------------ */
+  section('6. 上传列表：逐张进度与单张删除');
+
+  const sharp = require('sharp');
+
+  // 把浏览器端并发上限临时固定为 2：5 张图里必然有图片停留在「排队中」，
+  // 「上传进行中删除某一张」这条分支才能被确定性地触发。
+  const patchSettings = (body) =>
+    fetch(`${BASE}/api/settings`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  const fixedConcurrency = await patchSettings({ client_max_concurrency: 2 });
+  assert(fixedConcurrency.ok, '（前置）浏览器端并发上限已临时固定为 2', `HTTP ${fixedConcurrency.status}`);
+
+  /** 现场生成内容唯一的 PNG：避开秒传（秒传复用的记录不签发删除凭证） */
+  const uniquePng = (background) =>
+    sharp({ create: { width: 1600, height: 1200, channels: 3, background } })
+      .png({ compressionLevel: 6 })
+      .toBuffer();
+
+  const pk = await loadPage('/');
+  const KW = pk.window;
+  const KD = pk.document;
+  // 本页不注入 Canvas 替身：跳过客户端转码，图片原样上传，便于核对直链与删除结果
+  assert(pk.errors.length === 0, '上传页无运行时异常（逐张进度用例）', pk.errors.slice(0, 2).join(' | '));
+
+  const colors = [
+    { r: 12, g: 34, b: 56 },
+    { r: 210, g: 40, b: 90 },
+    { r: 30, g: 180, b: 70 },
+    { r: 240, g: 200, b: 20 },
+    { r: 90, g: 60, b: 220 },
+  ];
+  const batchFiles = [];
+  for (let i = 0; i < colors.length; i += 1) {
+    const buf = await uniquePng(colors[i]); // eslint-disable-line no-await-in-loop
+    batchFiles.push(new KW.File([new Uint8Array(buf)], `batch-${i + 1}.png`, { type: 'image/png' }));
+  }
+
+  const kInput = KD.querySelector('#file-input');
+  Object.defineProperty(kInput, 'files', { value: batchFiles, writable: false, configurable: true });
+  kInput.dispatchEvent(new KW.Event('change', { bubbles: true }));
+
+  // —— 6.1 一次多选：逐张建卡、逐张进度、逐张可删 ——
+  const pendingCards = [...KD.querySelectorAll('.result')];
+  assert(pendingCards.length === 5, '多张同时上传时逐张建立任务卡片', `${pendingCards.length} 张`);
+  assert(KD.querySelectorAll('.result .task-progress').length === 5,
+    '每张图片都有自己独立的进度条元素（取代统一总进度）');
+  assert(KD.querySelectorAll('.result [data-remove]').length === 5,
+    '每张图片都有自己独立的删除按钮');
+
+  const pendingStates = pendingCards.map((el) => el.dataset.state);
+  const queuedCards = pendingCards.filter((el) => el.dataset.state === 'queued');
+  assert(pendingStates.every((s) => ['queued', 'converting', 'uploading'].includes(s)),
+    '卡片初始处于排队 / 转码 / 上传中', pendingStates.join(','));
+  assert(queuedCards.length >= 1, '超出并发上限的图片停留在排队状态', pendingStates.join(','));
+
+  const queueHint = KD.querySelector('#queue-status');
+  assert(queueHint.hidden === false && /张上传中/.test(queueHint.textContent),
+    '列表头部显示在途任务计数', queueHint.textContent);
+
+  // —— 6.2 上传进行中单独删除一条：取消该任务并清理它自己的资源与状态 ——
+  const victimPending = queuedCards[queuedCards.length - 1];
+  const victimPendingUid = victimPending.dataset.uid;
+  const victimPendingName = victimPending.querySelector('.name span').textContent;
+
+  victimPending.querySelector('[data-remove]').dispatchEvent(new KW.MouseEvent('click', { bubbles: true }));
+
+  for (let i = 0; i < 40; i += 1) {
+    if (!KD.querySelector(`.result[data-uid="${victimPendingUid}"]`)) break;
+    await sleep(250);
+  }
+  assert(KD.querySelector(`.result[data-uid="${victimPendingUid}"]`) === null,
+    '上传进行中删除：该条任务已从列表移除', victimPendingName);
+  assert(KD.querySelectorAll('.result').length === 4,
+    '其余任务不受影响（并发槽位互不干扰）', `${KD.querySelectorAll('.result').length} 张`);
+  assert([...KD.querySelectorAll('.result')].every((c) => c.querySelector('[data-remove]')),
+    '剩余任务各自保留删除按钮');
+
+  // —— 6.3 其余任务正常跑完，各自升级为带引用格式的结果卡片 ——
+  for (let i = 0; i < 80; i += 1) {
+    if (KD.querySelectorAll('.result[data-state="done"]').length === 4) break;
+    await sleep(250);
+  }
+  const doneCards = [...KD.querySelectorAll('.result[data-state="done"]')];
+  assert(doneCards.length === 4, '其余 4 张全部上传完成', `${doneCards.length} 张`);
+  assert(
+    doneCards.every((c) => c.querySelectorAll('.tabs button').length === 5 && c.querySelector('[data-field]')),
+    '每张完成卡片各自提供 5 种引用格式与复制框',
+  );
+  assert(KD.querySelector('#queue-status').hidden === true, '全部结束后在途计数自动隐藏');
+
+  // —— 6.4 上传完成后单独删除一条：连同服务端资源一起清理 ——
+  const victim = doneCards[0];
+  const victimId = victim.querySelector('a[href^="/d/"]').getAttribute('href').replace('/d/', '');
+  const victimUrl = victim.querySelector('[data-field]').value;
+  assert(/^[A-Za-z0-9_-]{4,64}$/.test(victimId), '完成卡片可定位到服务端图片 ID', victimId);
+
+  const aliveBefore = await fetch(`${BASE}/api/images/${victimId}`);
+  assert(aliveBefore.status === 200, '删除前该记录确实存在', `HTTP ${aliveBefore.status}`);
+
+  victim.querySelector('[data-remove]').dispatchEvent(new KW.MouseEvent('click', { bubbles: true }));
+
+  for (let i = 0; i < 40; i += 1) {
+    if (KD.querySelectorAll('.result').length === 3) break;
+    await sleep(250);
+  }
+  assert(KD.querySelectorAll('.result').length === 3,
+    '完成后删除：该条任务已从列表移除', `${KD.querySelectorAll('.result').length} 张`);
+
+  // 本页是游客身份（本地无 Token），删除靠的正是上传响应下发的 delete_key
+  const goneAfter = await fetch(`${BASE}/api/images/${victimId}`);
+  assert(goneAfter.status === 404, '服务端记录已同步清理（公开元数据接口 404）', `HTTP ${goneAfter.status}`);
+
+  const deadLink = await fetch(victimUrl, { method: 'HEAD' });
+  assert(deadLink.status === 404, '删除后原直链不再可访问', `HTTP ${deadLink.status}`);
+
+  const restoredConcurrency = await patchSettings({ client_max_concurrency: 3 });
+  assert(restoredConcurrency.ok, '并发上限已还原为 3');
+
+  KW.close();
 
   /* ------------------------- 汇总 ------------------------- */
   console.log(`\n\x1b[1m检查结果\x1b[0m  通过 \x1b[32m${pass}\x1b[0m 项，失败 \x1b[31m${fail}\x1b[0m 项\n`);

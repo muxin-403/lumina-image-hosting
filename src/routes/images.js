@@ -4,7 +4,7 @@
  * 图片管理接口
  *   GET    /api/images              列表（管理员，支持分页/搜索/筛选/排序）
  *   GET    /api/images/:id          单张元数据（公开，用于程序化查询直链）
- *   DELETE /api/images/:id          删除（管理员）
+ *   DELETE /api/images/:id          删除（管理员或持上传凭证的本人）
  *   POST   /api/images/batch-delete 批量删除（管理员）
  *   GET    /api/stats               站点统计（管理员）
  */
@@ -14,6 +14,7 @@ const { Images } = require('../db');
 const { requireAdmin } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/error');
 const { toDTO, deleteImage, baseUrlOf } = require('../services/uploader');
+const { verifyDeleteKey } = require('../utils/deleteKey');
 const { ApiError, ok } = require('../utils');
 
 const router = express.Router();
@@ -106,13 +107,34 @@ router.get(
 
 /* ------------------------------ 删除 ------------------------------- */
 
+/**
+ * 删除单张图片，支持两种通路（满足其一即可）：
+ *   1) 管理员 Token（Authorization / Cookie）—— 可删除任意图片，可用 hard=1 物理删除；
+ *   2) 上传时下发的 delete_key 查询参数 —— 只能删「自己刚上传的那一张」，
+ *      供游客在上传页直接撤销本次上传；该通路一律软删除，不允许物理删除。
+ * 两条通路都不满足时返回 401，凭证不匹配时不泄露记录是否存在之外的信息。
+ */
 router.delete(
   '/:id',
-  requireAdmin,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
     assertId(id);
-    const result = await deleteImage(id, { hard: req.query.hard === '1' });
+
+    if (!req.isAdmin) {
+      const row = Images.getAny(id);
+      if (!row || row.deleted) throw new ApiError(404, `图片不存在：${id}`, 'IMAGE_NOT_FOUND');
+      if (!verifyDeleteKey(id, row.sha256, req.query.key)) {
+        throw new ApiError(
+          401,
+          '需要管理员权限，或提供上传时返回的 delete_key',
+          'UNAUTHORIZED',
+        );
+      }
+    }
+
+    // 物理删除为高危操作，仅管理员可用（凭证通路一律软删除）
+    const hard = req.query.hard === '1' && !!req.isAdmin;
+    const result = await deleteImage(id, { hard });
     return ok(res, { ...result, message: '删除成功' });
   }),
 );

@@ -59,22 +59,22 @@
         <span class="spacer"></span>
         <span class="hint" id="limit-hint">加载配置中…</span>
       </div>
-
-      <div class="progress" id="progress" hidden>
-        <div class="bar"><i id="progress-bar"></i></div>
-        <span class="txt" id="progress-text">0%</span>
-      </div>
     </section>
 
     <section id="results-section" hidden>
       <div class="results-head">
-        <h2>上传结果 <span class="badge info" id="result-count">0</span></h2>
+        <h2>
+          上传列表
+          <span class="badge info" id="result-count">0</span>
+          <span class="hint" id="queue-status" hidden role="status" aria-live="polite"></span>
+        </h2>
         <div class="actions">
           <button class="btn sm" type="button" id="copy-all-url">复制全部直链</button>
           <button class="btn sm" type="button" id="copy-all-md">复制全部 Markdown</button>
           <button class="btn sm" type="button" id="copy-all-bbcode">复制全部 BBCode</button>
           <button class="btn sm" type="button" id="download-urls">导出列表</button>
-          <button class="btn sm ghost" type="button" id="clear-results">清空</button>
+          <button class="btn sm ghost" type="button" id="clear-results"
+                  title="仅清空本页列表，不会删除服务器上的图片">清空列表</button>
         </div>
       </div>
       <div class="result-list" id="result-list"></div>

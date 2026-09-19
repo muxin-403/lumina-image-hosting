@@ -1,6 +1,12 @@
 /* ==========================================================================
    Lumina · 上传页逻辑
    拖拽 / 批量 / 剪贴板粘贴 → 客户端可选转 WebP → 并发上传（可配最大并发数） → 生成多格式引用
+   --------------------------------------------------------------------------
+   上传列表即结果列表：文件一提交就先占一条卡片（本地预览 + 独立进度条 + 删除按钮），
+   上传完成后同一张卡片就地升级为结果卡片，全程不再有「统一总进度条」。
+   任意状态下都能单独删除一条任务：
+     - 未完成 → 中断在途请求 / 让排队的 worker 跳过，并释放本地预览
+     - 已完成 → 携带上传时下发的 delete_key 清理服务端原图、缩略图与记录
    ========================================================================== */
 
 (() => {
@@ -12,16 +18,12 @@
   const $ = (id) => document.getElementById(id);
   const dz = $('dropzone');
   const fileInput = $('file-input');
-  const progress = $('progress');
-  const progressBar = $('progress-bar');
-  const progressText = $('progress-text');
   const resultList = $('result-list');
   const resultsSection = $('results-section');
   const emptyTip = $('empty-tip');
   const resultCount = $('result-count');
+  const queueStatus = $('queue-status');
 
-  /** 内存中的上传结果（用于「复制全部 / 导出」） */
-  const results = [];
   /**
    * 站点配置（来自 /api/config）。
    * 客户端上传策略（是否转 WebP / 是否压缩 / 质量 / 自动复制）
@@ -45,6 +47,24 @@
     { key: 'bbcode', label: 'BBCode' },
     { key: 'thumbnail', label: '缩略图' },
   ];
+
+  /** 任务状态 -> 卡片上的中文说明 */
+  const STATE_TEXT = {
+    queued: '排队中',
+    converting: '浏览器内转码',
+    uploading: '上传中',
+    failed: '上传失败',
+    canceled: '已取消',
+  };
+
+  /** 这些状态还没拿到可计算的进度字节数，进度条走不确定态动画 */
+  const INDETERMINATE = ['queued', 'converting'];
+
+  /** 卡片里没有本地预览时用的占位图标 */
+  const PLACEHOLDER_THUMB = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    stroke-width="1.3" aria-hidden="true" style="width:34px;height:34px;color:var(--text-muted)">
+    <rect x="3" y="3" width="18" height="18" rx="3" /><circle cx="8.5" cy="9" r="1.8" />
+    <path d="M21 16l-5.5-5.5L5 21" stroke-linecap="round" stroke-linejoin="round" /></svg>`;
 
   /* ---------------------------- 初始化配置 ---------------------------- */
 
@@ -150,10 +170,258 @@
     }
   }
 
+  /* ---------------------------- 任务列表状态 ---------------------------- */
+
+  /**
+   * 上传任务列表：顺序即展示顺序，与用户选择文件的顺序一致。
+   * 每项既是「进行中的上传任务」，也是「已完成的结果」，由 state 区分：
+   *   queued → converting → uploading → done | failed
+   * 任意时刻都可能有任务被用户删除（removed = true），处理流程据此提前收尾。
+   */
+  const tasks = [];
+  let uidSeq = 0;
+
+  /** 已完成的图片数据（供「复制全部直链 / 导出」使用） */
+  const doneItems = () => tasks.filter((t) => t.state === 'done' && t.item).map((t) => t.item);
+
+  /** 是否仍在途（未出结果） */
+  const isInflight = (t) => t.state === 'queued' || t.state === 'converting' || t.state === 'uploading';
+
+  /** 新建一条上传任务（带本地预览与一个「结算完成」的可等待承诺） */
+  function createTask(raw) {
+    uidSeq += 1;
+    let settle;
+    const settled = new Promise((resolve) => { settle = resolve; });
+
+    const task = {
+      uid: `task-${uidSeq}`,
+      raw,
+      name: raw.name || `未命名图片-${uidSeq}`,
+      size: raw.size || 0,
+      state: 'queued',
+      progress: 0,
+      converted: false,
+      savedBytes: 0,
+      item: null,       // 服务端返回的图片数据（成功后才有）
+      error: '',
+      xhr: null,        // 在途请求句柄，删除任务时用于中断
+      removed: false,   // 已被用户从列表删除
+      previewUrl: '',
+      settled,
+      _settle: settle,
+    };
+
+    // 本地预览：上传还没开始就能看到这张图；删除任务 / 切到服务端缩略图时释放
+    try {
+      task.previewUrl = URL.createObjectURL(raw);
+    } catch (_) {
+      task.previewUrl = ''; // 环境不支持（jsdom / 老浏览器）时降级为占位图标
+    }
+    return task;
+  }
+
+  /** 释放本地预览占用的内存 */
+  function releasePreview(task) {
+    if (!task.previewUrl) return;
+    try {
+      URL.revokeObjectURL(task.previewUrl);
+    } catch (_) { /* 环境不支持时忽略 */ }
+    task.previewUrl = '';
+  }
+
+  /* ------------------------------ 卡片渲染 ------------------------------ */
+
+  /** 生成一张任务卡片的 HTML（进行中 / 失败 / 完成共用同一套两栏布局） */
+  function cardHtml(task) {
+    const done = task.state === 'done';
+
+    /* --- 状态徽标 --- */
+    const badge = [];
+    if (done) {
+      const item = task.item;
+      if (item.vector) badge.push('<span class="badge info">矢量</span>');
+      if (item.animated) badge.push(`<span class="badge info">动态 ${item.pages} 帧</span>`);
+      if (item._clientConverted) badge.push('<span class="badge ok">客户端转 WebP</span>');
+      if (item.compression && item.compression.saved_bytes > 0) {
+        badge.push(`<span class="badge ok">优化 −${item.compression.saved_percent}%</span>`);
+      }
+      if (item.duplicated) badge.push('<span class="badge warn">内容重复（秒传）</span>');
+    } else if (task.state === 'failed') {
+      badge.push('<span class="badge warn">上传失败</span>');
+    } else {
+      badge.push(`<span class="badge info">${STATE_TEXT[task.state] || '处理中'}</span>`);
+    }
+
+    const cls = ['card', 'result'];
+    if (!done) cls.push(task.state === 'failed' ? 'is-failed' : 'is-pending');
+
+    return `
+      <article class="${cls.join(' ')}" data-uid="${task.uid}" data-state="${task.state}">
+        ${thumbHtml(task)}
+        <div class="info">
+          <div class="name">
+            <span>${escapeHtml(done ? task.item.filename : task.name)}</span>
+            ${removeButtonHtml(task)}
+          </div>
+          ${done ? doneMetaHtml(task.item) : pendingMetaHtml(task)}
+          <div class="badges">${badge.join('')}</div>
+          ${done ? formatsHtml(task) : taskLineHtml(task)}
+        </div>
+      </article>`;
+  }
+
+  /** 缩略图：进行中用本地预览，完成后换成服务端缩略图 */
+  function thumbHtml(task) {
+    if (task.state === 'done') {
+      const item = task.item;
+      return `<a class="thumb" href="${escapeHtml(item.page_url)}" target="_blank" rel="noopener">
+          <img src="${escapeHtml(item.thumb_url)}" alt="${escapeHtml(item.filename)}" loading="lazy" decoding="async" />
+        </a>`;
+    }
+    if (task.previewUrl) {
+      return `<div class="thumb"><img src="${escapeHtml(task.previewUrl)}" alt="${escapeHtml(task.name)}" /></div>`;
+    }
+    return `<div class="thumb">${PLACEHOLDER_THUMB}</div>`;
+  }
+
+  /** 单张删除按钮：进行中为「取消」，已完成为「删除」，两者都会清理该任务的资源与状态 */
+  function removeButtonHtml(task) {
+    const done = task.state === 'done';
+    const label = done ? '删除' : '取消';
+    const title = done
+      ? '从列表移除，并删除服务器上的原图与缩略图'
+      : '取消这张图片的上传任务';
+    return `<button class="btn sm ghost task-remove" type="button" data-remove="${task.uid}"
+        title="${escapeHtml(title)}"
+        aria-label="${escapeHtml(`${title}：${task.name}`)}">${label}</button>`;
+  }
+
+  function doneMetaHtml(item) {
+    return `
+      <div class="meta">
+        <span>${item.width || '?'} × ${item.height || '?'}</span>
+        <span>${escapeHtml(item.size_human || formatSize(item.size))}</span>
+        <span>${escapeHtml(String(item.ext).toUpperCase())}</span>
+        <span>${escapeHtml(new Date(item.created_at).toLocaleString('zh-CN', { hour12: false }))}</span>
+      </div>`;
+  }
+
+  function pendingMetaHtml(task) {
+    const ext = extOf(task.name);
+    const converted = task.converted ? '<span class="badge ok">已转 WebP</span>' : '';
+    return `
+      <div class="meta">
+        <span>${escapeHtml(formatSize(task.size))}</span>
+        ${ext ? `<span>${escapeHtml(ext.toUpperCase())}</span>` : ''}
+        ${converted}
+      </div>`;
+  }
+
+  /** 单张进度条 + 失败原因 */
+  function taskLineHtml(task) {
+    const indeterminate = INDETERMINATE.includes(task.state);
+    const pct = Math.round((task.progress || 0) * 100);
+    const note = task.state === 'failed'
+      ? `<div class="task-note error">${escapeHtml(task.error || '上传失败')}</div>`
+      : '';
+
+    return `
+      <div class="task-line">
+        <div class="task-progress${indeterminate ? ' is-indeterminate' : ''}" role="progressbar"
+             aria-valuemin="0" aria-valuemax="100"${indeterminate ? '' : ` aria-valuenow="${pct}"`}
+             aria-label="${escapeHtml(`${task.name} 上传进度`)}"><i style="width:${pct}%"></i></div>
+        <span class="task-pct">${indeterminate ? '—' : `${pct}%`}</span>
+      </div>${note}`;
+  }
+
+  /** 完成后的多格式引用区 */
+  function formatsHtml(task) {
+    const item = task.item;
+    const tabs = FORMAT_TABS.map(
+      (t, ti) =>
+        `<button type="button" data-tab="${t.key}" data-uid="${task.uid}" class="${ti === 0 ? 'active' : ''}">${t.label}</button>`,
+    ).join('');
+
+    const first = item.formats[FORMAT_TABS[0].key];
+    const isLong = first.length > 90;
+
+    return `
+      <div class="formats">
+        <div class="tabs" role="tablist">${tabs}</div>
+        <div class="copybox">
+          ${
+            isLong
+              ? `<textarea readonly rows="2" data-field="${task.uid}">${escapeHtml(first)}</textarea>`
+              : `<input readonly data-field="${task.uid}" value="${escapeHtml(first)}" />`
+          }
+          <button class="btn primary sm" type="button" data-copy="${task.uid}">复制</button>
+          <a class="btn sm" href="${escapeHtml(item.url)}" target="_blank" rel="noopener">打开</a>
+          <a class="btn sm ghost" href="/d/${escapeHtml(item.id)}" title="下载原图">下载</a>
+        </div>
+      </div>`;
+  }
+
+  function createCardEl(task) {
+    const wrap = document.createElement('div');
+    wrap.innerHTML = cardHtml(task);
+    return wrap.firstElementChild;
+  }
+
+  const cardOf = (uid) => resultList.querySelector(`.result[data-uid="${uid}"]`);
+
+  /** 列表头部（数量 / 在途张数）与空状态的同步 */
+  function syncListChrome() {
+    const has = tasks.length > 0;
+    resultsSection.hidden = !has;
+    emptyTip.hidden = has;
+    resultCount.textContent = String(tasks.length);
+
+    const inflight = tasks.filter(isInflight).length;
+    queueStatus.hidden = inflight === 0;
+    queueStatus.textContent = inflight ? `${inflight} 张上传中` : '';
+  }
+
+  /** 批量插入新任务卡片（一次重排，避免逐张插入的抖动） */
+  function appendTaskCards(list) {
+    const frag = document.createDocumentFragment();
+    for (const task of list) frag.appendChild(createCardEl(task));
+    resultList.appendChild(frag);
+    syncListChrome();
+  }
+
+  /** 单张卡片就地重绘（状态变化时调用；不影响其它卡片上正在进行的复制 / 切标签操作） */
+  function renderTask(task) {
+    const card = cardOf(task.uid);
+    if (!card) return; // 已被删除，无需渲染
+    card.replaceWith(createCardEl(task));
+    if (task.state === 'done') releasePreview(task); // 已切到服务端缩略图，本地预览不再需要
+    syncListChrome();
+  }
+
+  /** 只更新进度条本身：进度事件很密集，避免整卡重绘打断用户操作 */
+  function updateTaskProgress(task) {
+    const card = cardOf(task.uid);
+    if (!card) return;
+
+    const pct = Math.round((task.progress || 0) * 100);
+    if (card.dataset.pct === String(pct)) return; // 整数百分比没变就不碰 DOM
+    card.dataset.pct = String(pct);
+
+    const bar = card.querySelector('.task-progress');
+    if (bar) {
+      bar.classList.remove('is-indeterminate');
+      bar.setAttribute('aria-valuenow', String(pct));
+      const fill = bar.querySelector('i');
+      if (fill) fill.style.width = `${pct}%`;
+    }
+    const pctEl = card.querySelector('.task-pct');
+    if (pctEl) pctEl.textContent = `${pct}%`;
+  }
+
   /* ------------------------------ 上传逻辑 ------------------------------ */
 
   /** 用 XHR 以获取真实上传进度（fetch 目前无法报告上传进度） */
-  function uploadXHR(file, onProgress) {
+  function uploadXHR(file, { onProgress, onStart } = {}) {
     return new Promise((resolve, reject) => {
       const form = new FormData();
       form.append('file', file, file.name);
@@ -186,22 +454,177 @@
 
       xhr.addEventListener('error', () => reject(new Error('网络错误，上传中断')));
       xhr.addEventListener('abort', () => reject(new Error('上传已取消')));
+
+      // 交出请求句柄：任务被删除时用它中断在途上传
+      if (onStart) onStart(xhr);
       xhr.send(form);
     });
   }
 
-  function setProgress(ratio, text) {
-    progress.hidden = false;
-    progressBar.style.width = `${Math.round(ratio * 100)}%`;
-    progressText.textContent = text || `${Math.round(ratio * 100)}%`;
+  /**
+   * 处理单个任务：校验 → 可选转 WebP → 上传。
+   * 每个阶段都重新确认任务是否已被删除（removed），避免给已删除的任务写状态。
+   */
+  async function processOne(task, quality) {
+    try {
+      if (task.removed) return;
+
+      const invalid = checkFile(task.raw);
+      if (invalid) {
+        task.state = 'failed';
+        task.error = invalid;
+        toast(`${task.name}：${invalid}`, 'error', 4000);
+        return;
+      }
+
+      // 浏览器内转码：耗时且拿不到字节级进度，先让进度条进入不确定态
+      let file = task.raw;
+      if (config.client_convert_webp) {
+        task.state = 'converting';
+        renderTask(task);
+
+        const r = await convertToWebp(task.raw, quality);
+        if (task.removed) return;
+
+        file = r.file;
+        task.converted = r.converted;
+        task.savedBytes = r.savedBytes || 0;
+      }
+
+      if (task.removed) return;
+
+      task.state = 'uploading';
+      renderTask(task);
+
+      const data = await uploadXHR(file, {
+        onProgress: (p) => {
+          if (task.removed) return;
+          task.progress = p;
+          updateTaskProgress(task);
+        },
+        onStart: (xhr) => { task.xhr = xhr; },
+      });
+
+      if (task.removed) return; // 响应与删除同时到达：由 removeTask 负责善后
+
+      const items = Array.isArray(data) ? data : [data];
+      for (const item of items) {
+        item._clientConverted = task.converted;
+        item._originalName = task.name;
+        item._originalSize = task.size;
+      }
+      task.item = items[0];
+      task.progress = 1;
+      task.state = 'done';
+    } catch (err) {
+      if (task.removed) return; // 用户主动取消，不算失败
+      task.state = 'failed';
+      task.error = err.message;
+      toast(`${task.name}：${err.message}`, 'error', 4500);
+    } finally {
+      task.xhr = null;
+      task._settle(); // 通知 removeTask：该任务的最终状态已确定
+      if (!task.removed) renderTask(task); // 已删除的任务交给 removeTask 收尾，不再重绘
+    }
   }
 
   /**
-   * 并发处理整批文件（worker 池模型）：
-   *  - 最大同时在途张数由管理台配置项 client_max_concurrency 控制（1–6，默认 3）
-   *  - 每张图片按批次下标占用独立「槽位」，结果 / 进度 / 失败信息均与原文件一一对应，
+   * 删除单条上传任务（进行中 / 已完成都可用），并清理其对应的资源与状态：
+   *   未完成 → 中断在途请求 + 让排队的 worker 跳过 + 释放本地预览
+   *   已完成 → 用上传时下发的 delete_key（或管理员 Token）删除服务端原图、缩略图与记录
+   */
+  async function removeTask(uid, btn) {
+    const index = tasks.findIndex((t) => t.uid === uid);
+    if (index < 0) return;
+    const task = tasks[index];
+
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '处理中…';
+    }
+
+    const wasDone = task.state === 'done';
+
+    // ---- 1. 中断在途请求，并阻止排队的 worker 继续处理它 ----
+    task.removed = true;
+    if (task.xhr) {
+      try {
+        task.xhr.abort();
+      } catch (_) { /* 请求可能刚好已结束 */ }
+      task.xhr = null;
+    }
+
+    // ---- 2. 等这条任务的最终状态落定 ----
+    // 上传完成与点击删除可能同时发生，必须等 processOne 把 item 写下来再决定是否删服务端资源
+    await Promise.race([
+      task.settled,
+      new Promise((resolve) => setTimeout(resolve, 5000)),
+    ]);
+
+    // ---- 3. 清理服务端资源（仅对确实已落库的图片） ----
+    let cleanup = { attempted: false, deleted: false, reason: 'not-uploaded' };
+    if (task.item && task.item.id) {
+      cleanup = await deleteUploadedImage(task.item);
+    }
+
+    // ---- 4. 释放本地资源 ----
+    releasePreview(task);
+
+    // ---- 5. 从列表移除 ----
+    const card = cardOf(task.uid);
+    if (card) card.remove();
+    tasks.splice(tasks.indexOf(task), 1);
+    syncListChrome();
+
+    // ---- 6. 反馈 ----
+    if (!wasDone) {
+      toast(`${task.name}：已取消该上传任务`, 'info', 2400);
+    } else if (cleanup.deleted) {
+      toast(`${task.name}：已删除（含服务端原图与缩略图）`, 'success', 3000);
+    } else if (cleanup.reason === 'duplicated') {
+      toast(`${task.name}：已从列表移除（内容为秒传复用，服务端文件保留）`, 'info', 3600);
+    } else if (!cleanup.attempted) {
+      toast(`${task.name}：已从列表移除（无删除凭证，服务端文件保留）`, 'info', 3600);
+    } else {
+      toast(`${task.name}：已从列表移除，但服务端删除失败：${cleanup.message}`, 'error', 4500);
+    }
+  }
+
+  /**
+   * 删除服务端上这张图片的资源与记录。
+   *   - 管理员（本地有 Token）→ 直接调删除接口，可删任意图片
+   *   - 游客 → 携带上传响应下发的 delete_key，只能删自己刚上传的这一张
+   *   - 秒传复用来的记录不带凭证，不擅自删除别人的文件
+   */
+  async function deleteUploadedImage(item) {
+    const token = Lumina.store.get(Lumina.TOKEN_KEY);
+
+    if (!token && !item.delete_key) {
+      return {
+        attempted: false,
+        deleted: false,
+        reason: item.duplicated ? 'duplicated' : 'no-credential',
+      };
+    }
+
+    const qs = !token && item.delete_key ? `?key=${encodeURIComponent(item.delete_key)}` : '';
+    try {
+      await request(`/api/images/${encodeURIComponent(item.id)}${qs}`, { method: 'DELETE' });
+      return { attempted: true, deleted: true, reason: '' };
+    } catch (err) {
+      // 404 说明服务端已经没有了，对用户而言等同于清理成功
+      if (err.status === 404) return { attempted: true, deleted: true, reason: 'already-gone' };
+      return { attempted: true, deleted: false, reason: 'error', message: err.message };
+    }
+  }
+
+  /**
+   * 处理整批文件：
+   *  - 先为每个文件建立任务卡片并立即渲染（用户马上能看到逐张进度，而非一条总进度）
+   *  - 再用 worker 池并发上传，最大同时在途张数由 client_max_concurrency 控制（1–6，默认 3）
+   *  - 每张图片按批次下标占用独立「槽位」，进度 / 结果 / 失败信息与原文件一一对应，
    *    不依赖完成顺序；JS 单线程事件循环内领取下标，无竞态
-   *  - 整体进度 =（已完成数 + 在途已传比例之和）/ 总数，实时反映并发状态
+   *  - 任意一张都可在进行中或完成后被单独删除，删除后其槽位不再产生结果
    */
   async function handleFiles(fileList) {
     const files = Array.from(fileList || []);
@@ -226,190 +649,64 @@
     // 最大并发数：越界 / 非法配置一律回落到 1–6 区间内的安全值
     const maxConcurrent = Math.min(6, Math.max(1, Math.round(Number(config.client_max_concurrency) || 3)));
 
-    // 槽位状态：与 batch 下标严格对应，并发下互不干扰
-    const slotItems = new Array(batch.length).fill(null); // 成功结果（数组，防御多 item 响应）
-    const slotProgress = new Array(batch.length).fill(0); // 上传进度 0–1
-    const slotDone = new Array(batch.length).fill(false); // 是否已结束（无论成败）
+    // 1) 建任务 + 立即上屏：每张图片各有一条自己的进度条
+    const batchTasks = batch.map((raw) => createTask(raw));
+    tasks.push(...batchTasks);
+    appendTaskCards(batchTasks);
 
-    let nextIndex = 0; // 下一个待处理文件的下标（同步领取，无竞态）
-    let okCount = 0;
-    let failCount = 0;
-    let savedBytes = 0;
-    let lastUrl = null;
-
-    /** 聚合整体进度：已完成槽位记 1，在途槽位累加各自比例 */
-    const renderOverall = () => {
-      let done = 0;
-      let inflight = 0;
-      for (let i = 0; i < batch.length; i += 1) {
-        if (slotDone[i]) done += 1;
-        else inflight += slotProgress[i];
-      }
-      setProgress((done + inflight) / batch.length, `已完成 ${done}/${batch.length}${failCount ? ` · 失败 ${failCount}` : ''}`);
-    };
-
-    /** 处理单个文件：校验 → 可选转 WebP → 上传，结果写入自身槽位 */
-    const processOne = async (i) => {
-      const raw = batch[i];
-
-      const invalid = checkFile(raw);
-      if (invalid) {
-        failCount += 1;
-        slotDone[i] = true;
-        toast(`${raw.name}：${invalid}`, 'error', 4000);
-        renderOverall();
-        return;
-      }
-
-      let file = raw;
-      let converted = false;
-      if (config.client_convert_webp) {
-        const r = await convertToWebp(raw, quality);
-        file = r.file;
-        converted = r.converted;
-        if (r.converted) savedBytes += r.savedBytes;
-      }
-
-      try {
-        const data = await uploadXHR(file, (p) => {
-          slotProgress[i] = p; // 仅写本槽位，不影响其它在途请求
-          renderOverall();
-        });
-
-        const items = Array.isArray(data) ? data : [data];
-        for (const item of items) {
-          item._clientConverted = converted;
-          item._originalName = raw.name;
-          item._originalSize = raw.size;
-        }
-        slotItems[i] = items;
-        okCount += 1;
-        if (items[0] && items[0].url) lastUrl = items[0].url;
-      } catch (err) {
-        failCount += 1;
-        toast(`${raw.name}：${err.message}`, 'error', 4500);
-      } finally {
-        slotDone[i] = true;
-        slotProgress[i] = 1;
-        renderOverall();
-      }
-    };
-
-    // 启动固定数量的 worker：每个 worker 循环领取下一个下标，直到队列取空。
-    // worker 数量 = min(最大并发数, 文件数)，保证单张文件时不会多开空任务。
-    const workerCount = Math.min(maxConcurrent, batch.length);
+    // 2) worker 池并发消费；领取与自增在同一次同步执行中完成，不会重复分配
+    let nextIndex = 0;
+    const workerCount = Math.min(maxConcurrent, batchTasks.length);
     const workers = Array.from({ length: workerCount }, async () => {
-      while (nextIndex < batch.length) {
+      while (nextIndex < batchTasks.length) {
         const i = nextIndex;
         nextIndex += 1;
-        // 领取与自增在同一次同步执行中完成，事件循环保证不会重复分配
-        await processOne(i); // eslint-disable-line no-await-in-loop
+        await processOne(batchTasks[i], quality); // eslint-disable-line no-await-in-loop
       }
     });
 
-    // 等待全部 worker 退出；单张失败已在槽位内消化，不会中断整批
+    // 单张失败 / 被删除都已在任务内部消化，不会中断整批
     await Promise.all(workers);
 
-    setProgress(1, '完成');
-    setTimeout(() => { progress.hidden = true; progressBar.style.width = '0'; }, 700);
+    // 3) 批次小结（被用户删除的任务不计入成功与失败）
+    const doneTasks = batchTasks.filter((t) => t.state === 'done' && t.item);
+    const failCount = batchTasks.filter((t) => t.state === 'failed').length;
+    const removedCount = batchTasks.filter((t) => t.removed).length;
+    const savedBytes = batchTasks.reduce((sum, t) => sum + (t.savedBytes || 0), 0);
 
-    // 按批次顺序合并结果：从最后一个槽位向前 unshift，
-    // 使结果列表保持「先选择的文件排在最前」，与串行版体验一致
-    for (let i = batch.length - 1; i >= 0; i -= 1) {
-      const items = slotItems[i];
-      if (!items) continue; // 该槽位失败或被跳过
-      for (let j = items.length - 1; j >= 0; j -= 1) results.unshift(items[j]);
-    }
-    renderResults();
-
-    if (okCount) {
+    if (doneTasks.length) {
       const extra = savedBytes > 0 ? `，客户端转 WebP 省下 ${formatSize(savedBytes)}` : '';
-      toast(`成功上传 ${okCount} 张${failCount ? `，失败 ${failCount} 张` : ''}${extra}`, 'success', 3400);
+      const skip = removedCount ? `，手动移除 ${removedCount} 张` : '';
+      toast(
+        `成功上传 ${doneTasks.length} 张${failCount ? `，失败 ${failCount} 张` : ''}${skip}${extra}`,
+        'success',
+        3400,
+      );
     }
-    if (okCount && config.auto_copy_url && lastUrl) {
-      copyWithToast(lastUrl, '直链已复制到剪贴板');
+    if (doneTasks.length && config.auto_copy_url) {
+      copyWithToast(doneTasks[doneTasks.length - 1].item.url, '直链已复制到剪贴板');
     }
   }
 
-  /* ------------------------------ 结果渲染 ------------------------------ */
+  /* ------------------------------ 交互辅助 ------------------------------ */
 
-  function renderResults() {
-    resultsSection.hidden = results.length === 0;
-    emptyTip.hidden = results.length > 0;
-    resultCount.textContent = String(results.length);
+  /** 切换某条结果的引用格式 */
+  function switchTab(uid, key) {
+    const task = tasks.find((t) => t.uid === uid);
+    if (!task || task.state !== 'done' || !task.item) return;
 
-    resultList.innerHTML = results
-      .map((item, index) => {
-        const badge = [];
-        if (item.vector) badge.push('<span class="badge info">矢量</span>');
-        if (item.animated) badge.push('<span class="badge info">动态 ' + item.pages + ' 帧</span>');
-        if (item._clientConverted) badge.push('<span class="badge ok">客户端转 WebP</span>');
-        if (item.compression && item.compression.saved_bytes > 0) {
-          badge.push(`<span class="badge ok">优化 −${item.compression.saved_percent}%</span>`);
-        }
-        if (item.duplicated) badge.push('<span class="badge warn">内容重复（秒传）</span>');
-
-        const tabs = FORMAT_TABS.map(
-          (t, ti) =>
-            `<button type="button" data-tab="${t.key}" data-index="${index}" class="${ti === 0 ? 'active' : ''}">${t.label}</button>`,
-        ).join('');
-
-        const first = item.formats[FORMAT_TABS[0].key];
-        const isLong = first.length > 90;
-
-        return `
-        <article class="card result" data-index="${index}">
-          <a class="thumb" href="${escapeHtml(item.page_url)}" target="_blank" rel="noopener">
-            <img src="${escapeHtml(item.thumb_url)}" alt="${escapeHtml(item.filename)}" loading="lazy" decoding="async" />
-          </a>
-          <div class="info">
-            <div class="name">
-              <span>${escapeHtml(item.filename)}</span>
-            </div>
-            <div class="meta">
-              <span>${item.width || '?'} × ${item.height || '?'}</span>
-              <span>${escapeHtml(item.size_human || formatSize(item.size))}</span>
-              <span>${escapeHtml(item.ext.toUpperCase())}</span>
-              <span>${escapeHtml(new Date(item.created_at).toLocaleString('zh-CN', { hour12: false }))}</span>
-            </div>
-            <div class="badges">${badge.join('')}</div>
-
-            <div class="formats">
-              <div class="tabs" role="tablist">${tabs}</div>
-              <div class="copybox">
-                ${
-                  isLong
-                    ? `<textarea readonly rows="2" data-field="${index}">${escapeHtml(first)}</textarea>`
-                    : `<input readonly data-field="${index}" value="${escapeHtml(first)}" />`
-                }
-                <button class="btn primary sm" type="button" data-copy="${index}">复制</button>
-                <a class="btn sm" href="${escapeHtml(item.url)}" target="_blank" rel="noopener">打开</a>
-                <a class="btn sm ghost" href="/d/${escapeHtml(item.id)}" title="下载原图">下载</a>
-              </div>
-            </div>
-          </div>
-        </article>`;
-      })
-      .join('');
-  }
-
-  /** 切换某个结果的引用格式 */
-  function switchTab(index, key) {
-    const item = results[index];
-    if (!item) return;
-
-    const art = resultList.querySelector(`.result[data-index="${index}"]`);
+    const art = cardOf(uid);
     if (!art) return;
 
     art.querySelectorAll('.tabs button').forEach((b) => {
       b.classList.toggle('active', b.dataset.tab === key);
     });
 
-    const text = item.formats[key] || item.url;
+    const text = task.item.formats[key] || task.item.url;
     const box = art.querySelector('[data-field]');
     const next = document.createElement(text.length > 90 ? 'textarea' : 'input');
     next.setAttribute('readonly', '');
-    next.dataset.field = String(index);
+    next.dataset.field = uid;
     next.value = text;
     if (next.tagName === 'TEXTAREA') next.rows = 2;
     box.replaceWith(next);
@@ -492,50 +789,74 @@
 
   function bindResultActions() {
     resultList.addEventListener('click', (e) => {
-      const tabBtn = e.target.closest('.tabs button');
-      if (tabBtn) {
-        switchTab(Number(tabBtn.dataset.index), tabBtn.dataset.tab);
+      // 单张删除 / 取消：进行中与已完成状态下都可用
+      const removeBtn = e.target.closest('[data-remove]');
+      if (removeBtn) {
+        removeTask(removeBtn.dataset.remove, removeBtn);
         return;
       }
+
+      const tabBtn = e.target.closest('.tabs button');
+      if (tabBtn) {
+        switchTab(tabBtn.dataset.uid, tabBtn.dataset.tab);
+        return;
+      }
+
       const copyBtn = e.target.closest('[data-copy]');
       if (copyBtn) {
-        const item = results[Number(copyBtn.dataset.copy)];
+        const task = tasks.find((t) => t.uid === copyBtn.dataset.copy);
         const art = copyBtn.closest('.result');
         const field = art.querySelector('[data-field]');
-        copyWithToast(field ? field.value : item.url);
+        copyWithToast(field ? field.value : (task && task.item ? task.item.url : ''));
       }
     });
 
     $('copy-all-url').addEventListener('click', () => {
-      if (!results.length) return;
-      copyWithToast(results.map((r) => r.url).join('\n'), `已复制 ${results.length} 条直链`);
+      const items = doneItems();
+      if (!items.length) return;
+      copyWithToast(items.map((r) => r.url).join('\n'), `已复制 ${items.length} 条直链`);
     });
 
     $('copy-all-md').addEventListener('click', () => {
-      if (!results.length) return;
-      copyWithToast(results.map((r) => r.formats.markdown).join('\n'), `已复制 ${results.length} 条 Markdown`);
+      const items = doneItems();
+      if (!items.length) return;
+      copyWithToast(items.map((r) => r.formats.markdown).join('\n'), `已复制 ${items.length} 条 Markdown`);
     });
 
     $('copy-all-bbcode').addEventListener('click', () => {
-      if (!results.length) return;
-      copyWithToast(results.map((r) => r.formats.bbcode).join('\n'), `已复制 ${results.length} 条 BBCode`);
+      const items = doneItems();
+      if (!items.length) return;
+      copyWithToast(items.map((r) => r.formats.bbcode).join('\n'), `已复制 ${items.length} 条 BBCode`);
     });
 
     $('download-urls').addEventListener('click', () => {
-      if (!results.length) return;
+      const items = doneItems();
+      if (!items.length) return;
       const lines = [
         `# Lumina 图床导出 · ${new Date().toLocaleString('zh-CN', { hour12: false })}`,
-        `# 共 ${results.length} 张`,
+        `# 共 ${items.length} 张`,
         '',
-        ...results.map((r) => `${r.url}\t${r.filename}\t${r.width}x${r.height}\t${r.size_human}`),
+        ...items.map((r) => `${r.url}\t${r.filename}\t${r.width}x${r.height}\t${r.size_human}`),
       ];
       downloadText('lumina-urls.txt', lines.join('\n'));
       toast('已导出 URL 列表', 'success');
     });
 
     $('clear-results').addEventListener('click', () => {
-      results.length = 0;
-      renderResults();
+      // 只清空列表展示：不触碰服务器上的图片（要删图片请用每条的「删除」）
+      const finished = tasks.filter((t) => t.state === 'done' || t.state === 'failed');
+      if (!finished.length) {
+        toast('没有可清理的条目（上传中的任务请单独取消）', 'info', 2800);
+        return;
+      }
+      for (const task of finished) {
+        releasePreview(task);
+        const card = cardOf(task.uid);
+        if (card) card.remove();
+        tasks.splice(tasks.indexOf(task), 1);
+      }
+      syncListChrome();
+      toast(`已清空 ${finished.length} 条列表记录（服务器上的图片未被删除）`, 'info', 3400);
     });
   }
 

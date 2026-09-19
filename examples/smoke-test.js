@@ -5,6 +5,7 @@
  * ------------------------------------------------------------------
  * 覆盖完整业务闭环：
  *   健康检查 → 游客上传 → 直链可访问 → 缩略图 → 游客越权删除被拒
+ *   → 上传凭证删除（无凭证 / 伪造凭证被拒，合法凭证可删，秒传不下发凭证）
  *   → 管理员登录 → 管理员上传 → 列表/统计 → 动态改配置生效（游客限额）
  *   → 删除 → 删除后直链 404
  *
@@ -174,6 +175,62 @@ async function main() {
 
   const badToken = await fetch(`${BASE}/api/images`, { headers: { Authorization: 'Bearer forged.token' } });
   assert(badToken.status === 401, '伪造 Token 被拒绝', `HTTP ${badToken.status}`);
+
+  /* ----------- 3.5 上传凭证删除（上传页「删除单张任务」的服务端通路） ----------- */
+  section('3.5 上传凭证删除');
+
+  const sharp = require('sharp');
+  const crypto = require('crypto');
+
+  // 用随机噪声生成内容唯一的 PNG：确保本次是「新建记录」而非秒传
+  // （秒传复用别人的记录，按设计不下发删除凭证）
+  const noise = crypto.randomBytes(96 * 96 * 3);
+  const credBuf = await sharp(noise, { raw: { width: 96, height: 96, channels: 3 } })
+    .png()
+    .toBuffer();
+
+  /** 以游客身份上传一份字节内容（不走 api()，确保不带任何 Token） */
+  const postImage = async (buf, name) => {
+    const form = new FormData();
+    form.append('file', new Blob([buf]), name);
+    const res = await fetch(`${BASE}/api/upload`, { method: 'POST', body: form });
+    return { status: res.status, body: await res.json() };
+  };
+
+  const credUp = await postImage(credBuf, 'credential.png');
+  const cred = credUp.body.data;
+
+  assert(credUp.status === 200 && typeof cred.delete_key === 'string' && cred.delete_key.length > 0,
+    '新建记录的上传响应下发 delete_key（游客也能清理自己刚上传的图）',
+    `${String(cred.delete_key).slice(0, 10)}…`);
+  assert(cred.duplicated === false, '本次为新建记录，而非秒传复用');
+
+  const noKey = await fetch(`${BASE}/api/images/${cred.id}`, { method: 'DELETE' });
+  assert(noKey.status === 401, '不带 delete_key 的游客删除仍被拒绝', `HTTP ${noKey.status}`);
+
+  const forgedKey = await fetch(`${BASE}/api/images/${cred.id}?key=forged-key`, { method: 'DELETE' });
+  assert(forgedKey.status === 401, '伪造 delete_key 被拒绝', `HTTP ${forgedKey.status}`);
+
+  const withKey = await fetch(
+    `${BASE}/api/images/${cred.id}?key=${encodeURIComponent(cred.delete_key)}`,
+    { method: 'DELETE' },
+  );
+  const withKeyBody = await withKey.json();
+  assert(withKey.status === 200 && withKeyBody.success, '携带合法 delete_key 可删除该图片',
+    `HTTP ${withKey.status}`);
+
+  const credGone = await fetch(`${BASE}/api/images/${cred.id}`);
+  assert(credGone.status === 404, '凭证删除后元数据返回 404', `HTTP ${credGone.status}`);
+  const credLink = await fetch(cred.url, { method: 'HEAD' });
+  assert(credLink.status === 404, '凭证删除后直链不再可访问', `HTTP ${credLink.status}`);
+
+  // 秒传复用的记录不下发凭证：否则后上传者就能删掉先上传者的图
+  const seed = await postImage(credBuf, 'dedupe-seed.png');
+  assert(seed.body.data.duplicated === false, '（前置）重新上传同一内容建立基础记录');
+  const dupHit = await postImage(credBuf, 'dedupe-hit.png');
+  assert(dupHit.body.data.duplicated === true, '相同内容命中秒传', dupHit.body.data.id);
+  assert(dupHit.body.data.delete_key === null,
+    '秒传复用的记录不下发 delete_key（不会误删他人文件）');
 
   /* ---------------------------- 4. 管理员登录 ---------------------------- */
   section('4. 管理员鉴权');
