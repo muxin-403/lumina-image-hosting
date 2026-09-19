@@ -45,8 +45,8 @@
 
 | 角色 | 说明 |
 | --- | --- |
-| 游客（匿名） | 可上传（受 `guest_upload_enabled` 开关与 `guest_max_file_size` 限制）、可访问图片直链与公开元数据 |
-| 管理员 | 唯一账号，密码登录后获得 Token；可上传（不受游客限额）、查看列表、删除、改配置、看统计 |
+| 游客（匿名） | 可上传（受 `guest_upload_enabled` 开关与 `guest_max_file_size` 限制）、可访问图片直链与公开元数据；凭上传时下发的 `delete_key` 可删除自己刚上传的那一张 |
+| 管理员 | 唯一账号，密码登录后获得 Token；可上传（不受游客限额）、查看列表、删除任意图片、改配置、看统计 |
 
 ---
 
@@ -165,6 +165,8 @@ curl -X POST http://localhost:3000/api/upload \
       "bbcode_thumb": "[url=...][img]...[/img][/url]"
     },
 
+    "delete_key": "9fJ2mVq7Ls4Xp1Rw8Tn6Yb3Kc0Hd5Gz2",
+
     "duplicated": false,
     "compression": {
       "original_size": 943216,
@@ -191,6 +193,7 @@ curl -X POST http://localhost:3000/api/upload \
 | `animated` / `pages` | 是否为动态图、总帧数（动态图原样保留，不丢帧） |
 | `vector` | 是否为 SVG 矢量图（保持矢量，不栅格化） |
 | `duplicated` | 内容命中秒传（相同 sha256 已存在），复用已有记录 |
+| `delete_key` | **删除凭证**：凭它可删除本次上传的这一张（无需管理员 Token），见 `DELETE /api/images/:id`。秒传命中的记录为 `null` |
 | `compression` | 服务端优化前后的体积对比与说明 |
 
 **部分失败**：多文件上传时，只要有一张成功即返回 `200`，
@@ -254,17 +257,29 @@ curl -H "Authorization: Bearer $TOKEN" \
 获取单张图片的元数据（**公开接口**，无需 Token）。
 适合「已知 ID 要拿直链」的场景。
 
-### DELETE /api/images/:id 🔒
+### DELETE /api/images/:id 🔒 / 🔑
 
 删除图片：同时移除存储中的原图、本地缩略图，并对数据库记录做软删除。
 
+支持两种通路，满足其一即可：
+
+| 通路 | 凭据 | 权限范围 |
+| --- | --- | --- |
+| 管理员 | `Authorization: Bearer <token>`（或登录 Cookie） | 任意图片，可用 `hard=1` 物理删除 |
+| 上传凭证 | 查询参数 `key=<delete_key>` | **仅**上传响应中给出 `delete_key` 的那一张，一律软删除 |
+
 | 参数 | 说明 |
 | --- | --- |
-| hard=1 | 附加查询参数，执行物理删除而非软删除 |
+| key | 上传响应下发的 `delete_key`，游客凭它删除自己刚上传的那一张 |
+| hard=1 | 附加查询参数，执行物理删除而非软删除（仅管理员可用，凭证通路会忽略它） |
 
 ```bash
+# 管理员：可删任意图片
 curl -X DELETE -H "Authorization: Bearer $TOKEN" \
   http://localhost:3000/api/images/4fWYCKda9s
+
+# 游客：凭上传时拿到的 delete_key 删除刚上传的那张
+curl -X DELETE "http://localhost:3000/api/images/4fWYCKda9s?key=$DELETE_KEY"
 ```
 
 ```json
@@ -281,6 +296,9 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
 ```
 
 > `shared=true` 表示该文件被其它记录通过秒传共享，物理文件会被保留。
+>
+> 凭证由服务端用会话密钥（`SESSION_SECRET`）对「图片 ID + 内容哈希」签名生成，**不可伪造**，
+> 且只对签发时对应的那一条记录有效，无法拿去删除别的图片。两条通路都不满足时返回 `401 UNAUTHORIZED`。
 
 ### POST /api/images/batch-delete 🔒
 
@@ -474,7 +492,7 @@ curl -X PATCH http://localhost:3000/api/settings \
 | 400 | `MISSING_PASSWORD` | 登录未提供 password |
 | 400 | `BAD_ID` | 图片 ID 非法 |
 | 400 | `BAD_VALUE` / `UNKNOWN_SETTING` | 配置项非法 |
-| 401 | `UNAUTHORIZED` | 缺少或无效的管理员 Token |
+| 401 | `UNAUTHORIZED` | 缺少或无效的管理员 Token；删除图片时也可能是缺少 / 伪造 `delete_key` |
 | 401 | `BAD_CREDENTIALS` | 密码错误 |
 | 403 | `GUEST_UPLOAD_DISABLED` | 站点已关闭游客上传，改用管理员 Token |
 | 404 | `IMAGE_NOT_FOUND` | 图片不存在或已删除 |
