@@ -8,6 +8,16 @@
 - 版本号与 `package.json` 保持一致；镜像标签由 CI 依据 Git tag 生成（当前仓库尚未打 tag，
   故下方链接暂以提交区间代替，打 tag 后可换成 `compare/v1.1.0...v1.2.0` 形式）。
 
+## [未发布]
+
+### 问题修复
+
+- **修复 Node 24 上服务启动即原生崩溃（CI 测试套件 Node 24 矩阵失败）**：`better-sqlite3` 由 `^11.10.0` 升级至 `^13.0.3`。
+  - 根因是 Node 上游回归（nodejs/node#65195）：Node 24.19+ 在 GC / 退出清理路径中对存活的 `node::ObjectWrap` 触发 use-after-free，`node::RemoveEnvironmentCleanupHook` 断言 `(env) != nullptr` 失败 → 进程直接 abort（服务端日志仅有「SQLite 已就绪」一行，无任何 JS 层错误）。better-sqlite3 11.x / 12.x 基于 ObjectWrap 实现全部受影响；Node 22 不受该回归影响。
+  - better-sqlite3 13.x 起改用 N-API（node-addon-api）实现（清理钩子走 `napi_add_env_cleanup_hook`），不再使用 ObjectWrap，规避该回归；prebuilt 二进制跨 Node / Electron 版本通用，并移除了已废弃的 prebuild-install 依赖。
+  - 项目使用的 `prepare / run / get / all / transaction / pragma / exec` 接口在 13.x 无变化（13.0.0 无破坏性 API 变更），SQLite 内核同步升至 3.53.4；13.0.3 额外修复了 worker 线程终止导致进程 abort 的问题。
+  - 验证：隔离数据目录冷启动 + 三套测试 **62 / 32 / 99 共 193 项 0 失败**（Node v22.22.2 + better-sqlite3 13.0.3）。
+
 ## [1.4.0] - 2026-10-07
 
 ### 功能新增

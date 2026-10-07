@@ -13,7 +13,7 @@
 | --- | --- | --- | --- |
 | 运行时 | **Node.js** | ≥ 18.17（推荐 22 LTS） | 与 `sharp` / `fetch` / `FormData` 生态天然契合，容器镜像小 |
 | Web 框架 | **Express** | 4.x | 中间件模型清晰，路由/错误处理语义成熟，团队熟悉度最高 |
-| 数据库 | **SQLite（better-sqlite3）** | 11.x | 单文件零运维；同步 API 免去连接池与回调嵌套；性能足够单机图床量级 |
+| 数据库 | **SQLite（better-sqlite3）** | 13.x | 单文件零运维；同步 API 免去连接池与回调嵌套；性能足够单机图床量级；13.x 起 N-API 实现，prebuilt 跨 Node 版本通用 |
 | 图像处理 | **Sharp（libvips）** | 0.34 | 目前 Node 生态最快最稳的图像库，原生支持 WebP / AVIF / 动图多帧读取与 EXIF 自动转向 |
 | 文件接收 | **multer**（memoryStorage） | 2.x | 标准 multipart 解析；内存存储避免产生垃圾临时文件 |
 | 配置 | **dotenv** | 16.x | 只做环境变量加载，运行时热配置走数据库 |
