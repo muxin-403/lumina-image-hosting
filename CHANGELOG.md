@@ -18,6 +18,11 @@
   - 项目使用的 `prepare / run / get / all / transaction / pragma / exec` 接口在 13.x 无变化（13.0.0 无破坏性 API 变更），SQLite 内核同步升至 3.53.4；13.0.3 额外修复了 worker 线程终止导致进程 abort 的问题。
   - 验证：隔离数据目录冷启动 + 三套测试 **62 / 32 / 99 共 193 项 0 失败**（Node v22.22.2 + better-sqlite3 13.0.3）。
 
+- **修复多架构镜像构建失败（Node 22 容器内 `npm ci` 触发无谓编译）**：Dockerfile 依赖层安装命令追加 `--ignore-scripts`。
+  - better-sqlite3 13.x 的 prebuilt 二进制随 npm 包自带（`prebuilds/linux-x64|arm64|.node`），且声明 `gypfile: false`、无任何安装脚本；但 npm 10（node:22 镜像自带 npm）见到包内 `binding.gyp` 仍会注入隐式 `node-gyp rebuild`（lockfile 不携带 `gypfile:false`，npm 11 起才修复此行为），configure 需要的 Python 3 与 Node 源码头在 slim 镜像中不存在 → 构建失败。
+  - 本项目全部依赖无任何 `install / preinstall / postinstall` 脚本（已核对 lockfile 全量 0 项），`--ignore-scripts` 零副作用，直接命中包内 prebuilds，安装更快更稳。
+  - 验证：`npm ci --omit=dev --ignore-scripts` 全新安装后冷启动 + 真实上传 / 删除冒烟通过（SQLite 与 Sharp 均直接加载预编译产物）。
+
 ## [1.4.0] - 2026-10-07
 
 ### 功能新增

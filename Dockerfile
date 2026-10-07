@@ -12,11 +12,16 @@ WORKDIR /app
 # 仅复制清单文件，最大化利用 Docker layer 缓存
 COPY package.json package-lock.json* .npmrc* ./
 
-# 有 lockfile 用 npm ci（可复现），否则退回 npm install
+# 有 lockfile 用 npm ci（可复现），否则退回 npm install。
+# --ignore-scripts：本项目依赖（better-sqlite3 13.x / sharp 0.34+）的二进制均随包
+# 自带或经 optionalDependencies 平台子包分发，无需任何安装脚本；而 npm 10（Node 22
+# 自带）见到包内 binding.gyp 仍会注入隐式 node-gyp rebuild（无视包声明的
+# gypfile:false，lockfile 也不携带该字段），configure 需要 Python 3 与 Node 源码头，
+# slim 镜像没有这些工具链。跳过脚本即可直接命中包内 prebuilds，零编译、更快更稳。
 RUN if [ -f package-lock.json ]; then \
-      npm ci --omit=dev --no-audit --no-fund; \
+      npm ci --omit=dev --ignore-scripts --no-audit --no-fund; \
     else \
-      npm install --omit=dev --no-audit --no-fund; \
+      npm install --omit=dev --ignore-scripts --no-audit --no-fund; \
     fi \
  && npm cache clean --force
 
