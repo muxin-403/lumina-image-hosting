@@ -1,12 +1,14 @@
 /* ==========================================================================
    Lumina · 上传页逻辑
-   拖拽 / 批量 / 剪贴板粘贴 → 客户端可选转 WebP → 并发上传（可配最大并发数） → 生成多格式引用
+   拖拽 / 批量 / 剪贴板粘贴 → 客户端可选转 WebP → 页面级全局并发上传 → 生成多格式引用
    --------------------------------------------------------------------------
    上传列表即结果列表：文件一提交就先占一条卡片（本地预览 + 独立进度条 + 删除按钮），
    上传完成后同一张卡片就地升级为结果卡片，全程不再有「统一总进度条」。
    任意状态下都能单独删除一条任务：
      - 未完成 → 中断在途请求 / 让排队的 worker 跳过，并释放本地预览
      - 已完成 → 携带上传时下发的 delete_key 清理服务端原图、缩略图与记录
+   所有选图批次共享同一个并发调度器：页面内同时在途的任务总数受统一上限约束，
+   连续多批选图不会叠加负载（client_max_concurrency 的语义是页面全局上限）。
    ========================================================================== */
 
 (() => {
@@ -53,12 +55,13 @@
     queued: '排队中',
     converting: '正在转换格式',
     uploading: '上传中',
+    processing: '服务端处理中',
     failed: '上传失败',
     canceled: '已取消',
   };
 
   /** 这些状态还没拿到可计算的进度字节数，进度条走不确定态动画 */
-  const INDETERMINATE = ['queued', 'converting'];
+  const INDETERMINATE = ['queued', 'converting', 'processing'];
 
   /** 卡片里没有本地预览时用的占位图标 */
   const PLACEHOLDER_THUMB = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -123,24 +126,35 @@
 
   /* ---------------------- 客户端 WebP 转换（核心需求） ---------------------- */
 
+  /** 转换安全上限：任一边超过此值（浏览器 canvas 硬限制）时放弃转换 */
+  const CONVERT_MAX_DIM = 16384;
+  /**
+   * 总像素预算 ≈ 4096×4096（16.7MP）：对齐 iOS Safari 的 canvas 面积上限。
+   * 超预算的大图按原文件上传 —— 默认不做「预缩小主图」这种不可逆的分辨率损失，
+   * 内存紧张的低端设备也不会为了转码一次性吃掉几百 MB 的位图 + 画布内存。
+   */
+  const CONVERT_MAX_PIXELS = 4096 * 4096;
+
   /**
    * 在浏览器内把 JPG/PNG/BMP 转成 WebP：
    *  - 服务端零算力消耗，上传体积更小、更快
    *  - GIF（动图）、SVG（矢量）、AVIF 直接跳过：canvas 会破坏动画/矢量特性，
    *    AVIF 本身通常已比 WebP 更小
+   *  - 位图与画布的底层内存在所有路径上（含异常）都立即归还，不等 GC
    */
   async function convertToWebp(file, quality) {
     const convertible = ['image/jpeg', 'image/png', 'image/bmp', 'image/jpg'];
     if (!convertible.includes(file.type)) return { file, converted: false };
-
     if (typeof createImageBitmap !== 'function') return { file, converted: false };
 
+    let bitmap = null;
     try {
-      const bitmap = await createImageBitmap(file);
-      // 超大图会让 canvas 在某些浏览器上失败，这里设一个安全上限
-      if (bitmap.width > 16384 || bitmap.height > 16384) {
-        bitmap.close && bitmap.close();
-        return { file, converted: false };
+      bitmap = await createImageBitmap(file);
+      const pixels = bitmap.width * bitmap.height;
+      // 双重安全上限：单边超限或总像素超预算都直接放弃转换，按原文件上传
+      if (bitmap.width > CONVERT_MAX_DIM || bitmap.height > CONVERT_MAX_DIM
+        || pixels > CONVERT_MAX_PIXELS) {
+        return { file, converted: false, pixels };
       }
 
       const canvas = document.createElement('canvas');
@@ -148,21 +162,128 @@
       canvas.height = bitmap.height;
       const ctx = canvas.getContext('2d');
       ctx.drawImage(bitmap, 0, 0);
-      bitmap.close && bitmap.close();
 
       const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/webp', quality));
+
+      // 编码结果已拿到，立刻归还画布的 backing store（置 0 是各浏览器通用的释放手法）
+      canvas.width = 0;
+      canvas.height = 0;
+
       // toBlob 在 Safari 老版本会静默回退成 PNG，此时 blob.type 不是 webp
-      if (!blob || blob.type !== 'image/webp') return { file, converted: false };
-      if (blob.size >= file.size) return { file, converted: false }; // 没有收益就不转
+      if (!blob || blob.type !== 'image/webp') return { file, converted: false, pixels };
+      if (blob.size >= file.size) return { file, converted: false, pixels }; // 没有收益就不转
 
       const baseName = file.name.replace(/\.[^.]+$/, '') || 'image';
       const converted = new File([blob], `${baseName}.webp`, {
         type: 'image/webp',
         lastModified: Date.now(),
       });
-      return { file: converted, converted: true, savedBytes: file.size - blob.size };
+      return { file: converted, converted: true, savedBytes: file.size - blob.size, pixels };
     } catch (_) {
       return { file, converted: false };
+    } finally {
+      // 所有返回路径统一在此归还位图内存（close 幂等，重复调用无副作用）
+      if (bitmap && bitmap.close) {
+        try {
+          bitmap.close();
+        } catch (_) { /* 已释放 */ }
+      }
+    }
+  }
+
+  /* ---------------------- 分阶段耗时埋点（性能基线测量） ---------------------- */
+
+  /**
+   * 把每张图「排队等待 / 客户端转码 / 网络上传 / 服务端处理」各阶段耗时与字节量
+   * 记录到内存，用于端到端性能基线测量（先测量、再决定服务端要不要动）。
+   * 隐私边界：不上报、不持久化、不记录文件名与图片内容，只保留聚合数值；
+   * 打开 ?perf=1（或 localStorage['lumina-perf']='1'）后，每张图落定时在控制台
+   * 输出一行明细；控制台执行 __luminaPerf.summary() 可得各阶段 p50/p95。
+   */
+  const PERF_FLAG = 'lumina-perf';
+  const PERF_MAX_RECORDS = 1000;
+  const perfRecords = [];
+
+  const perfNow = () => (typeof performance !== 'undefined' && performance.now
+    ? performance.now()
+    : Date.now());
+
+  const round1 = (n) => Math.round(n * 10) / 10;
+
+  function perfDebugEnabled() {
+    try {
+      if (window.localStorage.getItem(PERF_FLAG) === '1') return true;
+      return new URLSearchParams(window.location.search).has('perf');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /** 已升序排序的数组取分位数 */
+  function percentile(sorted, p) {
+    if (!sorted.length) return 0;
+    const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
+    return sorted[idx];
+  }
+
+  /** 各阶段 p50/p95 汇总（__luminaPerf.summary() 的实现） */
+  function perfSummary() {
+    const ms = (key) => perfRecords
+      .filter((r) => r[key] !== null && r[key] !== undefined)
+      .map((r) => r[key])
+      .sort((a, b) => a - b);
+    const stat = (arr) => (arr.length
+      ? `p50 ${round1(percentile(arr, 50))}ms / p95 ${round1(percentile(arr, 95))}ms（n=${arr.length}）`
+      : '无样本');
+    return {
+      samples: perfRecords.length,
+      wait: stat(ms('waitMs')),       // 建卡 → 开始处理（全局队列中的排队时长）
+      convert: stat(ms('convertMs')), // 浏览器内解码 + WebP 编码
+      upload: stat(ms('uploadMs')),   // 请求体发送（真实 XHR 进度区间）
+      server: stat(ms('serverMs')),   // 请求体发完 → 收到响应（服务端处理 + 回程）
+      total: stat(ms('totalMs')),
+      srcBytes: perfRecords.reduce((s, r) => s + (r.srcBytes || 0), 0),
+      uploadBytes: perfRecords.reduce((s, r) => s + (r.uploadBytes || 0), 0),
+      savedBytes: perfRecords.reduce((s, r) => s + (r.savedBytes || 0), 0),
+    };
+  }
+
+  /** 任务落定时记录其阶段耗时（被删除的任务没有完整生命周期，不纳入统计） */
+  function recordPerf(task) {
+    if (task.removed || (task.state !== 'done' && task.state !== 'failed')) return;
+
+    const t = task.timings || {};
+    const firstStageStart = t.convertStart !== undefined ? t.convertStart : t.uploadStart;
+    const rec = {
+      state: task.state,
+      waitMs: firstStageStart !== undefined && t.queuedAt !== undefined
+        ? round1(firstStageStart - t.queuedAt) : null,
+      convertMs: t.convertStart !== undefined && t.convertEnd !== undefined
+        ? round1(t.convertEnd - t.convertStart) : null,
+      uploadMs: t.uploadStart !== undefined && t.uploadEnd !== undefined
+        ? round1(t.uploadEnd - t.uploadStart) : null,
+      serverMs: t.uploadEnd !== undefined && t.end !== undefined
+        ? round1(t.end - t.uploadEnd) : null,
+      totalMs: t.queuedAt !== undefined && t.end !== undefined
+        ? round1(t.end - t.queuedAt) : null,
+      srcBytes: task.size || 0,
+      uploadBytes: task.uploadBytes || 0,
+      savedBytes: task.savedBytes || 0,
+      converted: !!task.converted,
+      pixels: task.pixels || 0,
+    };
+
+    perfRecords.push(rec);
+    if (perfRecords.length > PERF_MAX_RECORDS) perfRecords.shift();
+
+    if (perfDebugEnabled()) {
+      // eslint-disable-next-line no-console
+      console.info(
+        `[lumina-perf] ${rec.state} total=${rec.totalMs}ms wait=${rec.waitMs} `
+        + `convert=${rec.convertMs} upload=${rec.uploadMs} server=${rec.serverMs} `
+        + `bytes=${rec.srcBytes}->${rec.uploadBytes}`,
+        rec,
+      );
     }
   }
 
@@ -171,7 +292,9 @@
   /**
    * 上传任务列表：顺序即展示顺序，与用户选择文件的顺序一致。
    * 每项既是「进行中的上传任务」，也是「已完成的结果」，由 state 区分：
-   *   queued → converting → uploading → done | failed
+   *   queued → converting → uploading → processing → done | failed
+   *   （converting 仅在开启客户端转码时经过；processing 在请求体发完、
+   *     服务端还没响应时出现 —— 上传进度 100% 不代表服务端处理完成）
    * 任意时刻都可能有任务被用户删除（removed = true），处理流程据此提前收尾。
    */
   const tasks = [];
@@ -181,7 +304,7 @@
   const doneItems = () => tasks.filter((t) => t.state === 'done' && t.item).map((t) => t.item);
 
   /** 是否仍在途（未出结果） */
-  const isInflight = (t) => t.state === 'queued' || t.state === 'converting' || t.state === 'uploading';
+  const isInflight = (t) => ['queued', 'converting', 'uploading', 'processing'].includes(t.state);
 
   /** 新建一条上传任务（带本地预览与一个「结算完成」的可等待承诺） */
   function createTask(raw) {
@@ -205,6 +328,11 @@
       previewUrl: '',
       settled,
       _settle: settle,
+
+      // 阶段耗时埋点：只记时间戳与字节数，不记文件名（详见 recordPerf）
+      timings: { queuedAt: perfNow() },
+      uploadBytes: 0,   // 实际发出的字节数（转码后可能与源文件不同）
+      pixels: 0,        // 转码时解码出的像素数（未解码为 0）
     };
 
     // 本地预览：上传还没开始就能看到这张图；删除任务 / 切到服务端缩略图时释放
@@ -237,7 +365,11 @@
       const item = task.item;
       if (item.vector) badge.push('<span class="badge info">矢量图（SVG）</span>');
       if (item.animated) badge.push(`<span class="badge info">动图（${item.pages} 帧）</span>`);
-      if (item._clientConverted) badge.push('<span class="badge ok">已转 WebP 省空间</span>');
+      if (item._clientConverted) {
+        // 显示真实节省量而非笼统的「省空间」：转换收益一目了然
+        const saved = Number(item._clientSavedBytes) || 0;
+        badge.push(`<span class="badge ok">已转 WebP${saved > 0 ? ` · 省 ${formatSize(saved)}` : ' 省空间'}</span>`);
+      }
       if (item.compression && item.compression.saved_bytes > 0) {
         badge.push(`<span class="badge ok">已压缩 −${item.compression.saved_percent}%</span>`);
       }
@@ -428,8 +560,46 @@
 
   /* ------------------------------ 上传逻辑 ------------------------------ */
 
+  /**
+   * 页面级全局并发调度器。
+   * 每个选图批次各自开 worker 池时，「单批上限 3」在连续选图后会叠加成
+   * 3×N 条同时在途（多份位图 + 多条并发请求同时压给浏览器与服务端）。
+   * 这里把所有批次的任务汇入同一个 FIFO 队列：页面内同时处于
+   * 「解码 / 转码 / 上传 / 等待响应」的任务总数受同一上限约束。
+   * 上限沿用 client_max_concurrency（1–6），语义从「单批上限」升级为「页面全局上限」。
+   */
+  const scheduler = {
+    active: 0,
+    waiting: [], // 已排队任务的唤醒回调，先来先服务
+
+    limit() {
+      // 越界 / 非法配置一律回落到 1–6 区间内的安全值（每次泵队列时重读，配置热改即时生效）
+      return Math.min(6, Math.max(1, Math.round(Number(config.client_max_concurrency) || 3)));
+    },
+
+    acquire() {
+      return new Promise((resolve) => {
+        scheduler.waiting.push(resolve);
+        scheduler.pump();
+      });
+    },
+
+    release() {
+      scheduler.active -= 1;
+      scheduler.pump();
+    },
+
+    pump() {
+      const limit = scheduler.limit();
+      while (scheduler.active < limit && scheduler.waiting.length) {
+        scheduler.active += 1;
+        scheduler.waiting.shift()();
+      }
+    },
+  };
+
   /** 用 XHR 以获取真实上传进度（fetch 目前无法报告上传进度） */
-  function uploadXHR(file, { onProgress, onStart } = {}) {
+  function uploadXHR(file, { onProgress, onUploaded, onStart } = {}) {
     return new Promise((resolve, reject) => {
       const form = new FormData();
       form.append('file', file, file.name);
@@ -442,6 +612,11 @@
 
       xhr.upload.addEventListener('progress', (e) => {
         if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+      });
+
+      // 请求体全部发完 ≠ 服务端处理完成：用它把任务切到「服务端处理中」阶段
+      xhr.upload.addEventListener('load', () => {
+        if (onUploaded) onUploaded();
       });
 
       xhr.addEventListener('load', () => {
@@ -470,11 +645,15 @@
   }
 
   /**
-   * 处理单个任务：校验 → 可选转 WebP → 上传。
+   * 处理单个任务：排队等全局槽位 → 校验 → 可选转 WebP → 上传 → 等响应。
    * 每个阶段都重新确认任务是否已被删除（removed），避免给已删除的任务写状态。
+   * 全程记录各阶段时间戳，落定时交给 recordPerf 汇总（不上报、不含文件名）。
    */
   async function processOne(task, quality) {
+    // 先排队等全局并发槽位；排队时长（建卡 → 开始处理）计入埋点
+    await scheduler.acquire();
     try {
+      task.timings.start = perfNow();
       if (task.removed) return;
 
       const invalid = checkFile(task.raw);
@@ -491,17 +670,21 @@
         task.state = 'converting';
         renderTask(task);
 
+        task.timings.convertStart = perfNow();
         const r = await convertToWebp(task.raw, quality);
+        task.timings.convertEnd = perfNow();
         if (task.removed) return;
 
         file = r.file;
         task.converted = r.converted;
         task.savedBytes = r.savedBytes || 0;
+        task.pixels = r.pixels || 0;
       }
 
       if (task.removed) return;
 
       task.state = 'uploading';
+      task.timings.uploadStart = perfNow();
       renderTask(task);
 
       const data = await uploadXHR(file, {
@@ -510,14 +693,25 @@
           task.progress = p;
           updateTaskProgress(task);
         },
+        onUploaded: () => {
+          // 请求体发完：切换到「服务端处理中」，进度回到不确定态（不伪造百分比）
+          if (task.removed || task.state !== 'uploading') return;
+          task.timings.uploadEnd = perfNow();
+          task.state = 'processing';
+          renderTask(task);
+        },
         onStart: (xhr) => { task.xhr = xhr; },
       });
 
+      // 个别浏览器 / 测试环境不触发 upload 的 load 事件，这里兜底补上时间戳
+      if (task.timings.uploadEnd === undefined) task.timings.uploadEnd = perfNow();
       if (task.removed) return; // 响应与删除同时到达：由 removeTask 负责善后
 
+      task.uploadBytes = file.size;
       const items = Array.isArray(data) ? data : [data];
       for (const item of items) {
         item._clientConverted = task.converted;
+        item._clientSavedBytes = task.savedBytes || 0;
         item._originalName = task.name;
         item._originalSize = task.size;
       }
@@ -530,8 +724,11 @@
       task.error = err.message;
       toast(`${task.name}：${err.message}`, 'error', 4500);
     } finally {
+      task.timings.end = perfNow();
+      scheduler.release();   // 槽位必须与结算一一对应，先归还再渲染
       task.xhr = null;
       task._settle(); // 通知 removeTask：该任务的最终状态已确定
+      recordPerf(task);      // 落定即记录阶段耗时（被删除的任务会被跳过）
       if (!task.removed) renderTask(task); // 已删除的任务交给 removeTask 收尾，不再重绘
     }
   }
@@ -629,9 +826,11 @@
   /**
    * 处理整批文件：
    *  - 先为每个文件建立任务卡片并立即渲染（用户马上能看到逐张进度，而非一条总进度）
-   *  - 再用 worker 池并发上传，最大同时在途张数由 client_max_concurrency 控制（1–6，默认 3）
-   *  - 每张图片按批次下标占用独立「槽位」，进度 / 结果 / 失败信息与原文件一一对应，
-   *    不依赖完成顺序；JS 单线程事件循环内领取下标，无竞态
+   *  - 再把每张任务提交到页面级全局调度器：所有批次共享同一个 FIFO 队列，
+   *    页面内同时「解码 / 转码 / 上传」的任务总数由 client_max_concurrency 统一约束
+   *    （1–6，默认 3）—— 连续多批选图不会再叠加在途数
+   *  - 每张图片占独立「槽位」，进度 / 结果 / 失败信息与原文件一一对应，
+   *    不依赖完成顺序；单线程事件循环内领取槽位，无竞态
    *  - 任意一张都可在进行中或完成后被单独删除，删除后其槽位不再产生结果
    */
   async function handleFiles(fileList) {
@@ -654,29 +853,20 @@
       ? Math.min(100, Math.max(40, Number(config.client_webp_quality) || 82)) / 100
       : 1;
 
-    // 最大并发数：越界 / 非法配置一律回落到 1–6 区间内的安全值
-    const maxConcurrent = Math.min(6, Math.max(1, Math.round(Number(config.client_max_concurrency) || 3)));
-
     // 1) 建任务 + 立即上屏：每张图片各有一条自己的进度条
     const batchTasks = batch.map((raw) => createTask(raw));
     tasks.push(...batchTasks);
     appendTaskCards(batchTasks);
 
-    // 2) worker 池并发消费；领取与自增在同一次同步执行中完成，不会重复分配
-    let nextIndex = 0;
-    const workerCount = Math.min(maxConcurrent, batchTasks.length);
-    const workers = Array.from({ length: workerCount }, async () => {
-      while (nextIndex < batchTasks.length) {
-        const i = nextIndex;
-        nextIndex += 1;
-        await processOne(batchTasks[i], quality); // eslint-disable-line no-await-in-loop
-      }
-    });
+    // 2) 提交到全局调度器：单张失败 / 被删除都在任务内部消化，不会中断整批
+    for (const t of batchTasks) {
+      processOne(t, quality);
+    }
 
-    // 单张失败 / 被删除都已在任务内部消化，不会中断整批
-    await Promise.all(workers);
+    // 3) 批次结算：每张任务的 settled 在其最终状态落定时 resolve（与批次无关）
+    await Promise.all(batchTasks.map((t) => t.settled));
 
-    // 3) 批次小结（被用户删除的任务不计入成功与失败）
+    // 4) 批次小结（被用户删除的任务不计入成功与失败）
     const doneTasks = batchTasks.filter((t) => t.state === 'done' && t.item);
     const failCount = batchTasks.filter((t) => t.state === 'failed').length;
     const removedCount = batchTasks.filter((t) => t.removed).length;
@@ -893,5 +1083,10 @@
     bindPaste();
     bindResultActions();
     loadConfig();
+
+    // 性能基线测量入口：控制台执行 __luminaPerf.summary() 得到各阶段 p50/p95；
+    // 加 ?perf=1（或 localStorage['lumina-perf']='1'）后每张图落定时打印明细。
+    // 只暴露内存中的聚合数值，不含文件名与图片内容。
+    window.__luminaPerf = { records: perfRecords, summary: perfSummary };
   });
 })();

@@ -114,6 +114,11 @@ async function storeFile({ file, isAdmin, clientIp = '', ua = '', req }) {
   const base = baseUrlOf(req);
   const storage = storageManager.get();
 
+  // 服务端分阶段耗时（探测/优化/缩略图由 processImage 内部计量），
+  // 只并入上传日志，不落库、不改接口响应 —— 供性能基线测量归因使用
+  const timings = {};
+
+  const processStart = Date.now();
   const result = await processImage(file.buffer, {
     allowedFormats: settings.get('allowed_formats'),
     optimize: !!settings.get('optimize'),
@@ -123,13 +128,16 @@ async function storeFile({ file, isAdmin, clientIp = '', ua = '', req }) {
     thumbnailWidth: Number(settings.get('thumbnail_width')) || 480,
     svgMinify: config.svgMinify,
   });
+  timings.processMs = Date.now() - processStart;
 
   // ---- 秒传：同内容不重复存储（可用 DEDUPE=0 关闭） ----
   const dedupe = Settings.get('dedupe');
   if (dedupe !== false) {
+    const dedupeStart = Date.now();
     const exist = Images.findBySha(result.sha256);
+    timings.dedupeMs = Date.now() - dedupeStart;
     if (exist) {
-      logger.info(`命中秒传 ${exist.id} <- ${file.originalname}`);
+      logger.info(`命中秒传 ${exist.id} <- ${file.originalname}`, { timings: { ...result.timings, ...timings } });
       // 秒传复用的是别人先创建的记录，因此不下发删除凭证：
       // 否则后上传者就能凭凭证删掉先上传者的图片
       return { dto: { ...toDTO(exist, base), delete_key: null }, duplicated: true, optimized: result };
@@ -142,7 +150,9 @@ async function storeFile({ file, isAdmin, clientIp = '', ua = '', req }) {
   const thumbKey = buildThumbKey(id, now);
 
   // 1) 写主存储（hybrid 模式下会同时写本地 + WebDAV）
+  const storeStart = Date.now();
   const putResult = await storage.put(key, result.buffer, result.mime);
+  timings.storeMs = Date.now() - storeStart;
 
   // 2) 写缩略图（恒本地，失败不阻断）
   let savedThumb = null;
@@ -158,6 +168,7 @@ async function storeFile({ file, isAdmin, clientIp = '', ua = '', req }) {
   }
 
   // 3) 落库
+  const dbStart = Date.now();
   const row = Images.create({
     id,
     storage_key: key,
@@ -178,6 +189,7 @@ async function storeFile({ file, isAdmin, clientIp = '', ua = '', req }) {
     uploader_ua: String(ua).slice(0, 200),
     created_at: Date.now(),
   });
+  timings.dbMs = Date.now() - dbStart;
 
   logger.ok(`已上传 ${id}.${result.ext}`, {
     size: humanize(result.buffer.length),
@@ -185,6 +197,7 @@ async function storeFile({ file, isAdmin, clientIp = '', ua = '', req }) {
     driver: storage.name,
     by: isAdmin ? 'admin' : 'guest',
     storage: putResult.results,
+    timings: { ...result.timings, ...timings },
   });
 
   const dto = toDTO(row, base);

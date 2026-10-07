@@ -6,10 +6,11 @@
  * 用 jsdom 真实加载上传页与管理台，执行其中的脚本，捕获任何运行时异常，
  * 并驱动一次真实上传与一次真实登录，验证界面确实渲染出了内容。
  *
- * 覆盖 6 个部分：
+ * 覆盖 7 个部分：
  *   1. 上传页加载与初始化          2. 真实上传流程与多格式引用
  *   3. 客户端 WebP 转换（核心需求）  4. 管理台登录与控制台渲染
  *   5. 管理台配置表单与存储自检      6. 上传列表逐张进度与单张删除
+ *   7. 页面级全局并发 / 像素预算 / 阶段埋点
  *
  * 第 3 部分为 jsdom 注入了 Canvas / createImageBitmap 的替身，用于端到端
  * 验证「浏览器内转 WebP」这条核心链路，包括 GIF/SVG/AVIF 的跳过规则与
@@ -486,8 +487,8 @@ async function main() {
 
   const pendingStates = pendingCards.map((el) => el.dataset.state);
   const queuedCards = pendingCards.filter((el) => el.dataset.state === 'queued');
-  assert(pendingStates.every((s) => ['queued', 'converting', 'uploading'].includes(s)),
-    '卡片初始处于排队 / 转码 / 上传中', pendingStates.join(','));
+  assert(pendingStates.every((s) => ['queued', 'converting', 'uploading', 'processing'].includes(s)),
+    '卡片初始处于排队 / 转码 / 上传中 / 服务端处理中', pendingStates.join(','));
   assert(queuedCards.length >= 1, '超出并发上限的图片停留在排队状态', pendingStates.join(','));
 
   const queueHint = KD.querySelector('#queue-status');
@@ -554,6 +555,105 @@ async function main() {
   assert(restoredConcurrency.ok, '并发上限已还原为 3');
 
   KW.close();
+
+  /* ---------- 7. 页面级全局并发 / 大图像素预算 / 阶段埋点 ---------- */
+  section('7. 页面级全局并发、像素预算与阶段埋点');
+
+  // —— 7.1 超出总像素预算的大图：放弃客户端转换，按原格式上传 ——
+  // 替身声称解码出 5000×5000（2500 万像素 > 16.7MP 预算），且 toBlob 能产出
+  // 合法 WebP。若前端没有总像素预算判断，这里会直接上传 .webp；
+  // 有预算则必须回退原文件（默认不缩小主图，不做不可逆的分辨率损失）。
+  const pb = await loadPage('/');
+  pb.window.createImageBitmap = async () => ({ width: 5000, height: 5000, close() {} });
+  pb.window.HTMLCanvasElement.prototype.getContext = () => ({ drawImage() {} });
+  pb.window.HTMLCanvasElement.prototype.toBlob = (cb) =>
+    cb(new pb.window.Blob([new Uint8Array(realWebp)], { type: 'image/webp' }));
+
+  const rHuge = await pickAndUpload(pb.window, pb.document,
+    new pb.window.File([assetBytes('sample.jpg')], 'huge.jpg', { type: 'image/jpeg' }));
+
+  assert(/\.jpg$/.test(rHuge.url),
+    '超出像素预算的大图跳过客户端转换（按原格式上传）', rHuge.url);
+  assert(!/已转 WebP/.test(rHuge.card ? rHuge.card.textContent : ''),
+    '像素预算回退时不显示「已转 WebP」徽标');
+  pb.window.close();
+
+  // —— 7.2 连续多批选图：在途任务数不超过页面级全局上限 ——
+  const fixedTwo = await patchSettings({ client_max_concurrency: 2 });
+  assert(fixedTwo.ok, '（前置）并发上限已临时固定为 2', `HTTP ${fixedTwo.status}`);
+
+  const gb = await loadPage('/');
+  const GW = gb.window;
+  const GD = gb.document;
+  assert(gb.errors.length === 0, '上传页无运行时异常（全局并发用例）', gb.errors.slice(0, 2).join(' | '));
+
+  // 两批各 3 张内容唯一的 PNG（不注入 Canvas 替身，原样上传，
+  // 每张都要走完「上传 → 服务端处理 → 响应」完整链路）
+  const gbColors = [
+    { r: 11, g: 22, b: 33 }, { r: 44, g: 55, b: 66 }, { r: 77, g: 88, b: 99 },
+    { r: 111, g: 122, b: 133 }, { r: 155, g: 166, b: 177 }, { r: 199, g: 210, b: 221 },
+  ];
+  const gInput = GD.querySelector('#file-input');
+  for (const half of [gbColors.slice(0, 3), gbColors.slice(3)]) {
+    const files = [];
+    for (let i = 0; i < half.length; i += 1) {
+      const buf = await uniquePng(half[i]); // eslint-disable-line no-await-in-loop
+      files.push(new GW.File([new Uint8Array(buf)], `global-${half[i].r}-${i}.png`, { type: 'image/png' }));
+    }
+    Object.defineProperty(gInput, 'files', { value: files, writable: false, configurable: true });
+    gInput.dispatchEvent(new GW.Event('change', { bubbles: true }));
+  }
+
+  // 轮询采样：任意时刻「转码/上传/服务端处理中」的卡片数不得超过全局上限 2
+  let overLimitSamples = 0;
+  let maxInflight = 0;
+  let sawQueued = false;
+  for (let i = 0; i < 140; i += 1) {
+    const cards = [...GD.querySelectorAll('.result')];
+    const inflight = cards.filter((c) =>
+      ['converting', 'uploading', 'processing'].includes(c.dataset.state)).length;
+    const queued = cards.filter((c) => c.dataset.state === 'queued').length;
+    if (queued > 0) sawQueued = true;
+    if (inflight > maxInflight) maxInflight = inflight;
+    if (inflight > 2) overLimitSamples += 1;
+    if (cards.length === 6
+      && cards.every((c) => ['done', 'failed'].includes(c.dataset.state))) break;
+    await sleep(150);
+  }
+
+  assert(GD.querySelectorAll('.result').length === 6,
+    '连续两批选图共建立 6 张任务卡片', `${GD.querySelectorAll('.result').length} 张`);
+  assert(GD.querySelectorAll('.result[data-state="done"]').length === 6,
+    '两批任务全部上传完成（跨批次队列不丢任务）',
+    `${GD.querySelectorAll('.result[data-state="done"]').length} 张`);
+  assert(overLimitSamples === 0,
+    '任意采样时刻在途任务数不超过全局上限 2（跨批次叠加已被约束）',
+    `超限采样 ${overLimitSamples} 次，峰值在途 ${maxInflight}`);
+  assert(sawQueued && maxInflight >= 2,
+    '调度器以 2 并发满载运行且存在排队（不是串行，也不是超额）',
+    `峰值在途 ${maxInflight}，见过排队 ${sawQueued}`);
+
+  // —— 7.3 阶段埋点：内存记录 + p50/p95 汇总，且不含文件名 ——
+  const perf = GW.__luminaPerf;
+  assert(perf && Array.isArray(perf.records) && typeof perf.summary === 'function',
+    '上传页暴露 __luminaPerf 阶段埋点入口（records + summary）');
+
+  if (perf) {
+    assert(perf.records.length >= 6,
+      '每张落定的任务都记录了阶段耗时', `${perf.records.length} 条`);
+    assert(perf.records.every((r) => r.totalMs !== null && r.totalMs >= 0 && r.srcBytes > 0),
+      '记录包含总耗时与源字节数');
+    assert(!JSON.stringify(perf.records).includes('global-'),
+      '埋点记录不含文件名（隐私边界）');
+    const sum = perf.summary();
+    assert(sum.samples === perf.records.length && sum.total.includes('p50') && sum.total.includes('p95'),
+      'summary() 输出各阶段 p50/p95 汇总', JSON.stringify(sum.total));
+  }
+
+  const restoredTwo = await patchSettings({ client_max_concurrency: 3 });
+  assert(restoredTwo.ok, '并发上限已还原为 3');
+
+  GW.close();
 
   /* ------------------------- 汇总 ------------------------- */
   console.log(`\n\x1b[1m检查结果\x1b[0m  通过 \x1b[32m${pass}\x1b[0m 项，失败 \x1b[31m${fail}\x1b[0m 项\n`);

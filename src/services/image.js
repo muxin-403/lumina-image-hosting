@@ -259,7 +259,13 @@ async function processImage(raw, opt) {
     throw new ApiError(400, '空文件', 'EMPTY_FILE');
   }
 
+  // 分阶段耗时：随处理结果一并返回，由调用方并入上传日志（不落库、不改响应结构），
+  // 用于回答「服务端时间花在探测 / 优化 / 缩略图哪一段」这类基线测量问题
+  const timings = {};
+
+  const probeStart = Date.now();
   const info = await probe(raw);
+  timings.probeMs = Date.now() - probeStart;
 
   const allowed = (opt.allowedFormats || []).map((s) => String(s).toLowerCase());
   const extAlias = info.ext === 'jpg' ? ['jpg', 'jpeg'] : [info.ext];
@@ -279,6 +285,7 @@ async function processImage(raw, opt) {
   let resized = false;
   let note = '';
 
+  const optimizeStart = Date.now();
   if (vector) {
     if (opt.svgMinify !== false) {
       const minified = Buffer.from(minifySvg(raw.toString('utf8')), 'utf8');
@@ -310,11 +317,14 @@ async function processImage(raw, opt) {
       /* 保持原值 */
     }
   }
+  timings.optimizeMs = Date.now() - optimizeStart; // 含缩放后的尺寸重读
 
+  const thumbStart = Date.now();
   const thumbBuffer = await makeThumbnail(finalBuffer, {
     ext: info.ext,
     width: opt.thumbnailWidth,
   });
+  timings.thumbMs = Date.now() - thumbStart;
 
   return {
     buffer: finalBuffer,
@@ -333,6 +343,7 @@ async function processImage(raw, opt) {
     thumbBuffer,
     rawSize: raw.length,
     finalSize: finalBuffer.length,
+    timings,
   };
 }
 
