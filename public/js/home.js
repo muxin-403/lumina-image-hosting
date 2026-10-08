@@ -57,11 +57,36 @@
     uploading: '上传中',
     processing: '服务端处理中',
     failed: '上传失败',
+    retry_wait: '等待自动重试',
     canceled: '已取消',
   };
 
   /** 这些状态还没拿到可计算的进度字节数，进度条走不确定态动画 */
-  const INDETERMINATE = ['queued', 'converting', 'processing'];
+  const INDETERMINATE = ['queued', 'converting', 'processing', 'retry_wait'];
+
+  /* ----------------------- 失败自动重试（重试队列） ----------------------- */
+
+  /**
+   * 自动重试策略：指数退避（3s → 6s → 12s），最多自动重试 3 次。
+   * 只有「值得再试」的失败才进入重试队列：
+   *   - 网络错误 / 请求被中断（无 HTTP 状态）—— 通常是瞬时网络抖动
+   *   - HTTP 5xx —— 服务端临时故障
+   *   - HTTP 408 / 429 —— 请求超时 / 触发限流，等待后重试有意义
+   * 校验类失败（格式不支持、空文件）与 4xx 业务错误（未授权 / 文件过大等）
+   * 重试也不会成功，直接停在失败态，交给用户决定（可手动重试）。
+   */
+  const AUTO_RETRY_BASE_MS = 3000;
+  const MAX_AUTO_RETRIES = 3;
+
+  function isRetryableError(err) {
+    const s = err && err.status;
+    if (s === undefined || s === 0) return true; // 网络错误 / 无状态码
+    if (s >= 500) return true;
+    return s === 408 || s === 425 || s === 429;
+  }
+
+  /** 第 N 次自动重试前的等待时长（指数退避） */
+  const retryDelayMs = (autoRetries) => AUTO_RETRY_BASE_MS * 2 ** (autoRetries - 1);
 
   /** 卡片里没有本地预览时用的占位图标 */
   const PLACEHOLDER_THUMB = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -329,6 +354,13 @@
       settled,
       _settle: settle,
 
+      // 重试相关：attempt 是总尝试次数（含首次），autoRetries 是本轮自动重试计数
+      attempt: 0,
+      autoRetries: 0,
+      retryTimer: null, // 自动重试的 setTimeout 句柄（删除任务 / 手动重试时清除）
+      retryAt: 0,       // 下次自动重试的时间戳（倒计时展示用）
+      quality: 1,       // 客户端转码质量（handleFiles 时按配置写入，重试沿用）
+
       // 阶段耗时埋点：只记时间戳与字节数，不记文件名（详见 recordPerf）
       timings: { queuedAt: perfNow() },
       uploadBytes: 0,   // 实际发出的字节数（转码后可能与源文件不同）
@@ -375,7 +407,14 @@
       }
       if (item.duplicated) badge.push('<span class="badge warn">与已有图片相同，已复用原文件</span>');
     } else if (task.state === 'failed') {
-      badge.push('<span class="badge warn">上传失败</span>');
+      // 醒目的失败标识：红色徽标 + 尝试次数，一眼看出这张卡需要处理
+      badge.push('<span class="badge danger"><i class="dot" aria-hidden="true"></i>上传失败</span>');
+      if (task.attempt > 1) {
+        badge.push(`<span class="badge warn">已自动重试 ${task.attempt - 1} 次</span>`);
+      }
+    } else if (task.state === 'retry_wait') {
+      badge.push('<span class="badge danger"><i class="dot" aria-hidden="true"></i>上传失败</span>');
+      badge.push(`<span class="badge info">${STATE_TEXT.retry_wait}（${task.autoRetries}/${MAX_AUTO_RETRIES}）</span>`);
     } else {
       badge.push(`<span class="badge info">${STATE_TEXT[task.state] || '处理中'}</span>`);
     }
@@ -389,6 +428,7 @@
         <div class="info">
           <div class="name">
             <span>${escapeHtml(done ? task.item.filename : task.name)}</span>
+            ${retryButtonHtml(task)}
             ${removeButtonHtml(task)}
           </div>
           <div class="meta">
@@ -426,6 +466,22 @@
         aria-label="${escapeHtml(`${title}：${task.name}`)}">${label}</button>`;
   }
 
+  /**
+   * 单张重试按钮：仅失败态与等待自动重试态出现。
+   * 等待重试时点它可跳过倒计时立即重传；重试次数用尽后这是唯一的重试入口。
+   */
+  function retryButtonHtml(task) {
+    if (task.state !== 'failed' && task.state !== 'retry_wait') return '';
+    const waiting = task.state === 'retry_wait';
+    const label = waiting ? '立即重试' : '重试';
+    const title = waiting
+      ? '跳过等待，立即重新上传这张图片'
+      : '重新上传这张图片';
+    return `<button class="btn sm primary task-retry" type="button" data-retry="${task.uid}"
+        title="${escapeHtml(title)}"
+        aria-label="${escapeHtml(`${title}：${task.name}`)}">${label}</button>`;
+  }
+
   /** 完成后的 meta 信息（尺寸 / 体积 / 格式 / 时间，弱化为次要信息行） */
   function doneMetaInner(item) {
     return `
@@ -449,8 +505,20 @@
    * 直接突出「失败原因」，让用户第一时间看到该做什么。
    */
   function taskLineHtml(task) {
+    if (task.state === 'retry_wait') {
+      // 等待自动重试：失败原因 + 每秒刷新的倒计时（由 retryTicker 维护）
+      return `
+        <div class="task-note error">失败原因：${escapeHtml(task.error || '上传失败，请重试')}</div>
+        <div class="task-note retry">将在 <span class="countdown" data-countdown="${task.uid}">…</span> 后自动重试
+         （第 ${task.autoRetries}/${MAX_AUTO_RETRIES} 次，可点「立即重试」跳过等待）</div>`;
+    }
+
     if (task.state === 'failed') {
-      return `<div class="task-note error">失败原因：${escapeHtml(task.error || '上传失败，请重试')}</div>`;
+      const exhausted = task.autoRetries >= MAX_AUTO_RETRIES;
+      const hint = exhausted ? '自动重试已用尽，可点「重试」再试一次' : '可点「重试」重新上传';
+      return `
+        <div class="task-note error">失败原因：${escapeHtml(task.error || '上传失败，请重试')}</div>
+        <div class="task-note retry">${hint}</div>`;
     }
 
     const indeterminate = INDETERMINATE.includes(task.state);
@@ -508,10 +576,23 @@
     resultCount.textContent = String(tasks.length);
 
     const inflight = tasks.filter(isInflight).length;
-    queueStatus.hidden = inflight === 0;
-    queueStatus.textContent = inflight
-      ? `${inflight} 张上传中 · 已完成 ${tasks.filter((t) => t.state === 'done').length} 张`
-      : '';
+    const retryWaiting = tasks.filter((t) => t.state === 'retry_wait' && !t.removed).length;
+    queueStatus.hidden = inflight === 0 && retryWaiting === 0;
+    const parts = [];
+    if (inflight) parts.push(`${inflight} 张上传中`);
+    if (retryWaiting) parts.push(`${retryWaiting} 张等待自动重试`);
+    parts.push(`已完成 ${tasks.filter((t) => t.state === 'done').length} 张`);
+    queueStatus.textContent = parts.join(' · ');
+
+    // 批量重试按钮：有任何失败（含等待重试）的图片时才出现，并实时显示数量
+    const failedCount = tasks.filter(
+      (t) => (t.state === 'failed' || t.state === 'retry_wait') && !t.removed,
+    ).length;
+    const retryAllBtn = $('retry-all');
+    if (retryAllBtn) {
+      retryAllBtn.hidden = failedCount === 0;
+      retryAllBtn.textContent = failedCount ? `批量重试（${failedCount}）` : '批量重试';
+    }
 
     // 没有任何完成项时弱化批量操作按钮，点击会给出解释而不是无响应
     const hasDone = tasks.some((t) => t.state === 'done' && t.item);
@@ -654,6 +735,7 @@
     await scheduler.acquire();
     try {
       task.timings.start = perfNow();
+      task.attempt += 1; // 第几次尝试（含首次上传与所有重试）
       if (task.removed) return;
 
       const invalid = checkFile(task.raw);
@@ -722,7 +804,19 @@
       if (task.removed) return; // 用户主动取消，不算失败
       task.state = 'failed';
       task.error = err.message;
-      toast(`${task.name}：${err.message}`, 'error', 4500);
+
+      // 可重试的失败（网络抖动 / 5xx / 超时 / 限流）自动进入重试队列，
+      // 按指数退避排队再试；重试次数用尽或错误本身重试无意义时停在失败态
+      if (isRetryableError(err) && task.autoRetries < MAX_AUTO_RETRIES) {
+        scheduleAutoRetry(task);
+        toast(
+          `${task.name}：${err.message}（${Math.round(retryDelayMs(task.autoRetries) / 1000)} 秒后自动重试 `
+          + `${task.autoRetries}/${MAX_AUTO_RETRIES}）`,
+          'error', 4500,
+        );
+      } else {
+        toast(`${task.name}：${err.message}`, 'error', 4500);
+      }
     } finally {
       task.timings.end = perfNow();
       scheduler.release();   // 槽位必须与结算一一对应，先归还再渲染
@@ -731,6 +825,86 @@
       recordPerf(task);      // 落定即记录阶段耗时（被删除的任务会被跳过）
       if (!task.removed) renderTask(task); // 已删除的任务交给 removeTask 收尾，不再重绘
     }
+  }
+
+  /* --------------------------- 重试队列与手动重试 --------------------------- */
+
+  /**
+   * 把失败任务放入重试队列：先在卡片上进入「等待自动重试」态并显示倒计时，
+   * 到点后重新提交给全局调度器（与正常上传共用并发上限，不会挤占在途请求）。
+   * 重试走完整的 processOne 流程 —— 再次失败仍按策略继续排队，直到次数用尽。
+   */
+  function scheduleAutoRetry(task) {
+    task.autoRetries += 1;
+    task.state = 'retry_wait';
+    const delay = retryDelayMs(task.autoRetries);
+    task.retryAt = Date.now() + delay;
+    task.retryTimer = setTimeout(() => {
+      task.retryTimer = null;
+      if (task.removed) return;
+      submitRetry(task);
+    }, delay);
+    ensureRetryTicker();
+  }
+
+  /**
+   * 取消尚未触发的自动重试定时器（删除任务 / 手动重试前调用）。
+   * 返回任务是否确实处于「失败 / 等待重试」这两种可重试状态。
+   */
+  function clearRetryTimer(task) {
+    if (task.retryTimer) {
+      clearTimeout(task.retryTimer);
+      task.retryTimer = null;
+    }
+    return task.state === 'failed' || task.state === 'retry_wait';
+  }
+
+  /**
+   * 重新提交一张失败图片：清掉旧状态后回到完整上传流程
+   * （排队 → 可选转码 → 上传 → 服务端处理），卡片上的进度条随之恢复。
+   * 手动重试会开启新一轮自动重试周期（autoRetries 清零），次数重新计算。
+   */
+  function submitRetry(task) {
+    if (task.removed || !clearRetryTimer(task)) return;
+
+    task.autoRetries = 0;
+    task.error = '';
+    task.progress = 0;
+    task.uploadBytes = 0;
+    task.timings = { queuedAt: perfNow() };
+    task.state = 'queued';
+    renderTask(task);
+    processOne(task, task.quality);
+  }
+
+  /** 批量重试所有上传失败的图片（含正在等待自动重试的），一次性重新提交 */
+  function retryAllFailed() {
+    const failed = tasks.filter(
+      (t) => (t.state === 'failed' || t.state === 'retry_wait') && !t.removed,
+    );
+    if (!failed.length) {
+      toast('当前没有上传失败的图片', 'info', 2800);
+      return;
+    }
+    for (const task of failed) submitRetry(task);
+    toast(`已重新提交 ${failed.length} 张失败图片，正在按队列重试`, 'info', 3200);
+  }
+
+  /**
+   * 倒计时心跳：每秒把「等待自动重试」卡片上的剩余秒数刷新一次。
+   * 常驻但极轻：没有等待任务时本轮直接返回，不碰任何 DOM。
+   */
+  function ensureRetryTicker() {
+    if (ensureRetryTicker.timer) return;
+    ensureRetryTicker.timer = setInterval(() => {
+      const waiting = tasks.filter((t) => t.state === 'retry_wait' && !t.removed);
+      for (const task of waiting) {
+        const el = resultList.querySelector(`[data-countdown="${task.uid}"]`);
+        if (!el) continue;
+        const left = Math.max(0, Math.ceil((task.retryAt - Date.now()) / 1000));
+        el.textContent = left > 0 ? `${left} 秒` : '即将重试…';
+      }
+    }, 1000);
   }
 
   /**
@@ -750,8 +924,9 @@
 
     const wasDone = task.state === 'done';
 
-    // ---- 1. 中断在途请求，并阻止排队的 worker 继续处理它 ----
+    // ---- 1. 中断在途请求 / 清除待触发的自动重试，并阻止排队的 worker 继续处理它 ----
     task.removed = true;
+    clearRetryTimer(task);
     if (task.xhr) {
       try {
         task.xhr.abort();
@@ -855,6 +1030,7 @@
 
     // 1) 建任务 + 立即上屏：每张图片各有一条自己的进度条
     const batchTasks = batch.map((raw) => createTask(raw));
+    for (const t of batchTasks) t.quality = quality; // 重试时沿用本批次的转码策略
     tasks.push(...batchTasks);
     appendTaskCards(batchTasks);
 
@@ -994,6 +1170,17 @@
         return;
       }
 
+      // 单张重试：失败态 / 等待自动重试态卡片上的「重试 / 立即重试」
+      const retryBtn = e.target.closest('[data-retry]');
+      if (retryBtn) {
+        const task = tasks.find((t) => t.uid === retryBtn.dataset.retry);
+        if (task) {
+          submitRetry(task);
+          toast(`${task.name}：已重新提交上传`, 'info', 2400);
+        }
+        return;
+      }
+
       const tabBtn = e.target.closest('.tabs button');
       if (tabBtn) {
         switchTab(tabBtn.dataset.uid, tabBtn.dataset.tab);
@@ -1026,6 +1213,9 @@
       }
       return items;
     };
+
+    // 批量重试：一次性重试所有上传失败的图片（含等待自动重试的）
+    $('retry-all').addEventListener('click', retryAllFailed);
 
     $('copy-all-url').addEventListener('click', () => {
       const items = requireDone();

@@ -6,11 +6,12 @@
  * 用 jsdom 真实加载上传页与管理台，执行其中的脚本，捕获任何运行时异常，
  * 并驱动一次真实上传与一次真实登录，验证界面确实渲染出了内容。
  *
- * 覆盖 7 个部分：
+ * 覆盖 8 个部分：
  *   1. 上传页加载与初始化          2. 真实上传流程与多格式引用
  *   3. 客户端 WebP 转换（核心需求）  4. 管理台登录与控制台渲染
  *   5. 管理台配置表单与存储自检      6. 上传列表逐张进度与单张删除
  *   7. 页面级全局并发 / 像素预算 / 阶段埋点
+ *   8. 失败自动重试（重试队列 / 失败标识 / 批量重试）
  *
  * 第 3 部分为 jsdom 注入了 Canvas / createImageBitmap 的替身，用于端到端
  * 验证「浏览器内转 WebP」这条核心链路，包括 GIF/SVG/AVIF 的跳过规则与
@@ -654,6 +655,101 @@ async function main() {
   assert(restoredTwo.ok, '并发上限已还原为 3');
 
   GW.close();
+
+  /* ------------ 8. 失败自动重试：重试队列 / 醒目标识 / 批量重试 ------------ */
+  section('8. 失败自动重试（重试队列、失败标识、批量重试）');
+
+  const rr = await loadPage('/');
+  const RW = rr.window;
+  const RD = rr.document;
+  assert(rr.errors.length === 0, '上传页无运行时异常（重试用例）', rr.errors.slice(0, 2).join(' | '));
+
+  // 批量重试按钮初始隐藏（还没有失败项）
+  assert(RD.querySelector('#retry-all') !== null, '页面提供「批量重试」按钮');
+  assert(RD.querySelector('#retry-all').hidden === true, '无失败项时批量重试按钮隐藏');
+
+  // 用 mock XHR 让所有上传「网络错误」失败（无状态码 → 可重试），确定性触发重试链路
+  const RealXHR = RW.XMLHttpRequest;
+  let mockFails = true;
+  class FailingXHR {
+    constructor() { this.upload = { addEventListener() {} }; this.status = 0; }
+    open() {}
+    setRequestHeader() {}
+    addEventListener(type, cb) {
+      if (type === 'error') this._onError = cb;
+      if (type === 'abort') this._onAbort = cb;
+    }
+    send() {
+      setTimeout(() => {
+        if (mockFails && this._onError) this._onError();
+      }, 30);
+    }
+  }
+  RW.XMLHttpRequest = FailingXHR;
+
+  const retryFiles = [];
+  for (let i = 0; i < 2; i += 1) {
+    const buf = await uniquePng({ r: 70 + i, g: 80, b: 90 }); // eslint-disable-line no-await-in-loop
+    retryFiles.push(new RW.File([new Uint8Array(buf)], `retry-${i + 1}.png`, { type: 'image/png' }));
+  }
+  const rInput = RD.querySelector('#file-input');
+  Object.defineProperty(rInput, 'files', { value: retryFiles, writable: false, configurable: true });
+  rInput.dispatchEvent(new RW.Event('change', { bubbles: true }));
+
+  // 8.1 失败后自动进入重试队列：卡片出现醒目失败标识与倒计时
+  for (let i = 0; i < 40; i += 1) {
+    if (RD.querySelectorAll('.result[data-state="retry_wait"]').length === 2) break;
+    await sleep(250);
+  }
+  const waitCards = [...RD.querySelectorAll('.result[data-state="retry_wait"]')];
+  assert(waitCards.length === 2, '可重试的失败（网络错误）自动进入重试队列（等待自动重试态）',
+    `${waitCards.length} 张`);
+  assert(
+    waitCards.every((c) => c.querySelector('.badge.danger') !== null
+      && /上传失败/.test(c.querySelector('.badge.danger').textContent)),
+    '失败卡片带有醒目的红色「上传失败」徽标',
+  );
+  assert(waitCards.every((c) => c.querySelector('[data-countdown]') !== null),
+    '等待重试卡片显示自动重试倒计时');
+  assert(waitCards.every((c) => /第 1\/3 次/.test(c.textContent)),
+    '倒计时文案标注本轮自动重试进度（1/3）');
+  assert(waitCards.every((c) => c.querySelector('.task-retry') !== null),
+    '失败卡片提供单张「立即重试」按钮');
+
+  // 8.2 批量重试按钮随失败数量出现
+  const retryAllBtn = RD.querySelector('#retry-all');
+  assert(retryAllBtn.hidden === false && /批量重试（2）/.test(retryAllBtn.textContent),
+    '批量重试按钮出现并实时显示失败数量', retryAllBtn.textContent.trim());
+
+  // 8.3 单张「立即重试」：跳过倒计时立即重传；再次失败后重新排队（第 2 次尝试）
+  waitCards[0].querySelector('.task-retry').dispatchEvent(
+    new RW.MouseEvent('click', { bubbles: true }),
+  );
+  for (let i = 0; i < 40; i += 1) {
+    const c = RD.querySelector(`.result[data-uid="${waitCards[0].dataset.uid}"]`);
+    if (c && c.dataset.state === 'retry_wait' && /已自动重试 1 次/.test(c.textContent)) break;
+    await sleep(250);
+  }
+  const retriedCard = RD.querySelector(`.result[data-uid="${waitCards[0].dataset.uid}"]`);
+  assert(retriedCard && /等待自动重试（1\/3）/.test(retriedCard.textContent),
+    '手动重试后再失败：重新进入重试队列，自动重试进度如实累计（1/3）');
+
+  // 8.4 恢复真实网络后批量重试：全部失败图片一次性重传并成功
+  mockFails = false;
+  RW.XMLHttpRequest = RealXHR;
+  retryAllBtn.dispatchEvent(new RW.MouseEvent('click', { bubbles: true }));
+
+  for (let i = 0; i < 60; i += 1) {
+    if (RD.querySelectorAll('.result[data-state="done"]').length === 2) break;
+    await sleep(250);
+  }
+  assert(RD.querySelectorAll('.result[data-state="done"]').length === 2,
+    '批量重试后全部失败图片上传成功',
+    `${RD.querySelectorAll('.result[data-state="done"]').length} 张`);
+  assert(RD.querySelectorAll('.badge.danger').length === 0, '成功后失败徽标即时消失');
+  assert(RD.querySelector('#retry-all').hidden === true, '全部成功后批量重试按钮自动隐藏');
+
+  RW.close();
 
   /* ------------------------- 汇总 ------------------------- */
   console.log(`\n\x1b[1m检查结果\x1b[0m  通过 \x1b[32m${pass}\x1b[0m 项，失败 \x1b[31m${fail}\x1b[0m 项\n`);

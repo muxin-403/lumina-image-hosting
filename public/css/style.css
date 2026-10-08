@@ -259,6 +259,13 @@ h1, h2, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -0.01em; line-heig
 .task-note { font-size: 12.5px; color: var(--text-muted); margin-top: 8px; }
 /* 失败原因优先于一切：失败态不再显示进度条，错误行是卡片里唯一的信息 */
 .task-note.error { color: var(--danger); font-size: 13.5px; font-weight: 550; margin-top: 10px; line-height: 1.55; }
+/* 重试提示行（失败原因下方的次要说明） */
+.task-note.retry { color: var(--text-muted); margin-top: 5px; }
+.task-note.retry .countdown { color: var(--brand); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* 单张重试按钮：与删除按钮并排靠右，重试在外侧 */
+.btn.task-retry { margin-left: auto; flex: none; }
+.task-retry + .task-remove { margin-left: 0; }
 
 /* 单张删除：任何状态下都可用（进行中 = 取消该任务，已完成 = 连同服务端资源一起清理） */
 .btn.task-remove {
@@ -305,6 +312,22 @@ h1, h2, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -0.01em; line-heig
 .badge.ok { background: var(--success-soft); color: var(--success); border-color: transparent; }
 .badge.warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
 .badge.info { background: var(--brand-soft); color: var(--brand); border-color: transparent; }
+/* 醒目的失败标识：红色底 + 脉冲圆点，在卡片列表里一眼可辨 */
+.badge.danger {
+  background: var(--danger-soft); color: var(--danger); border-color: transparent;
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.badge.danger .dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--danger); flex: none;
+  animation: danger-pulse 1.4s ease-in-out infinite;
+}
+@keyframes danger-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .35; transform: scale(.72); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .badge.danger .dot { animation: none; }
+}
 
 /* 引用格式切换 */
 .formats { margin-top: 12px; }
