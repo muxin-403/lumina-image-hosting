@@ -110,7 +110,7 @@ async function main() {
 
   const png = created.find((c) => c.ext === 'png');
   const svg = created.find((c) => c.ext === 'svg');
-  const gif = created.find((c) => c.ext === 'gif');
+  const gif = created.find((c) => c.ext === 'gif' || c.converted_from === 'gif');
 
   if (png) {
     assert(typeof png.url === 'string' && png.url.startsWith('http'), '生成可公开访问的直链', png.url);
@@ -153,7 +153,14 @@ async function main() {
     assert(gif.animated === true && gif.pages > 1, 'GIF 被识别为动态图', `${gif.pages} 帧`);
     const g = await fetch(gif.url);
     const buf = Buffer.from(await g.arrayBuffer());
-    assert(buf.subarray(0, 3).toString('ascii') === 'GIF', '动态图原样存储，仍为 GIF 格式');
+    if (gif.ext === 'webp') {
+      // 「客户端转 WebP」开启时，动画 GIF 由服务端转为动画 WebP（保留全部帧与循环）
+      assert(gif.converted_from === 'gif', '动画 GIF 由服务端转为 WebP（converted_from=gif）');
+      assert(buf.subarray(0, 4).toString('ascii') === 'RIFF' && buf.subarray(8, 12).toString('ascii') === 'WEBP',
+        '动画 GIF 已转为动画 WebP（RIFF/WEBP 文件头）');
+    } else {
+      assert(buf.subarray(0, 3).toString('ascii') === 'GIF', '动态图原样存储，仍为 GIF 格式');
+    }
     assert(gif.height === 120 && gif.width === 120, '动态图尺寸计算正确（已剔除多帧堆叠高度）',
       `${gif.width}×${gif.height}`);
   }

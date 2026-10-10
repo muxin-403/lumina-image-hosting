@@ -14,8 +14,8 @@
  *   8. 失败自动重试（重试队列 / 失败标识 / 批量重试）
  *
  * 第 3 部分为 jsdom 注入了 Canvas / createImageBitmap 的替身，用于端到端
- * 验证「浏览器内转 WebP」这条核心链路，包括 GIF/SVG/AVIF 的跳过规则与
- * Safari toBlob 静默回退的兜底判断。
+ * 验证「浏览器内转 WebP」这条核心链路，包括 SVG/AVIF 的跳过规则、动画 GIF
+ * 的服务端转码与 Safari toBlob 静默回退的兜底判断。
  *
  * 这不是替代真实浏览器的手段，但能确定性地抓住「脚本一加载就报错」
  * 「DOM id 对不上」「接口字段名不匹配」这类最常见的前端问题，
@@ -262,9 +262,8 @@ async function main() {
   assert((head.headers.get('content-type') || '').includes('image/webp'),
     '服务端落盘的确实是 WebP（Content-Type 校验）', head.headers.get('content-type'));
 
-  // —— 3.2 不可转换格式：GIF 动图 / SVG 矢量 / AVIF 必须原样上传 ——
+  // —— 3.2 不可转换格式：SVG 矢量 / AVIF 必须原样上传 ——
   const skipCases = [
-    ['anim.gif', 'image/gif', 'gif', 'GIF 动图跳过客户端转换（canvas 会丢动画帧）'],
     ['vector.svg', 'image/svg+xml', 'svg', 'SVG 矢量图跳过客户端转换（canvas 会栅格化）'],
     ['sample.avif', 'image/avif', 'avif', 'AVIF 跳过客户端转换（本身通常已小于 WebP）'],
   ];
@@ -272,6 +271,14 @@ async function main() {
     const r = await pickAndUpload(PW, PD, new PW.File([assetBytes(name)], name, { type: mime }));
     assert(new RegExp(`\\.${ext}$`).test(r.url), label, r.url);
   }
+
+  // —— 3.2b 动画 GIF：客户端跳过转码（canvas 只能编码单帧），由服务端转为动画 WebP ——
+  const rGif = await pickAndUpload(PW, PD,
+    new PW.File([assetBytes('anim.gif')], 'anim.gif', { type: 'image/gif' }));
+  assert(/\.webp$/.test(rGif.url),
+    '动画 GIF 客户端跳过转码，由服务端转为动画 WebP（直链后缀为 .webp）', rGif.url);
+  assert(rGif.card && /动画 GIF 已转 WebP/.test(rGif.card.textContent),
+    '结果卡片标注「动画 GIF 已转 WebP」徽标');
   PW.close();
 
   // —— 3.3 浏览器撒谎时（Safari 老版本 toBlob 静默回退成 PNG）不得误报成功 ——

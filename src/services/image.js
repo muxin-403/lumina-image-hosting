@@ -219,6 +219,18 @@ async function optimizeRaster(buffer, ext, opts) {
   }
 }
 
+/**
+ * 动画 GIF → 动画 WebP：
+ * sharp 以 animated 模式读入全部帧，libvips 会把每帧延时与循环次数一并
+ * 写入 WebP 容器（ANMF/ANIM 块），帧数与播放效果保持不变。
+ * 浏览器端 canvas 只能编码单帧 WebP，动图转码只能由服务端完成。
+ */
+async function convertAnimatedGifToWebp(raw, { quality }) {
+  return sharp(raw, { animated: true, limitInputPixels: 268402689 })
+    .webp({ quality, effort: 4 })
+    .toBuffer();
+}
+
 /** 生成缩略图（WebP，恒本地存储） */
 async function makeThumbnail(buffer, { ext, width }) {
   const target = Math.max(64, Number(width) || 480);
@@ -251,8 +263,9 @@ async function makeThumbnail(buffer, { ext, width }) {
 /**
  * 完整的图片处理流水线
  * @param {Buffer} raw 原始字节
- * @param {object} opt { allowedFormats, optimize, quality, maxWidth, maxHeight, thumbnailWidth }
- * @returns {Promise<object>} 处理结果
+ * @param {object} opt { allowedFormats, optimize, quality, maxWidth, maxHeight,
+ *                       thumbnailWidth, svgMinify, convertAnimatedGif }
+ * @returns {Promise<object>} 处理结果（convertedFrom 为服务端代做的格式转换来源）
  */
 async function processImage(raw, opt) {
   if (!Buffer.isBuffer(raw) || raw.length === 0) {
@@ -283,6 +296,7 @@ async function processImage(raw, opt) {
   let finalBuffer = raw;
   let optimized = false;
   let resized = false;
+  let convertedFrom = null; // 服务端代做的格式转换来源（如动画 GIF -> WebP）
   let note = '';
 
   const optimizeStart = Date.now();
@@ -296,8 +310,32 @@ async function processImage(raw, opt) {
       }
     }
   } else if (animated) {
-    // 动态图：保留所有帧，不做有损再编码（避免闪烁/掉帧）
-    note = `动态图（${info.pages} 帧），已保留原始数据`;
+    // 动态图：保留所有帧，不做有损再编码（避免闪烁/掉帧）。
+    // 例外：动画 GIF 可转成动画 WebP —— 浏览器端 canvas 无法做动画转码，
+    // 由服务端用 sharp 完成；libvips 保留全部帧、每帧延时与循环次数。
+    // 仅当开启了「客户端转 WebP」开关（视为站点级转 WebP 策略）
+    // 且允许 webp 格式时执行，转码后反而更大则保留原 GIF。
+    const webpAllowed = allowed.length === 0 || allowed.includes('webp');
+    if (info.format === 'gif' && opt.convertAnimatedGif && webpAllowed) {
+      try {
+        const out = await convertAnimatedGifToWebp(raw, opt);
+        if (out.length < raw.length) {
+          finalBuffer = out;
+          info.ext = 'webp';
+          info.mime = EXT_MIME.webp;
+          optimized = true;
+          convertedFrom = 'gif';
+          note = `动画 GIF 已转 WebP（${info.pages} 帧，帧序与循环已保留）`;
+        } else {
+          note = `动态图（${info.pages} 帧），转 WebP 无体积收益，已保留原格式`;
+        }
+      } catch (err) {
+        logger.warn('动画 GIF 转 WebP 失败，保留原始文件', err.message);
+        note = `动态图（${info.pages} 帧），已保留原始数据`;
+      }
+    } else {
+      note = `动态图（${info.pages} 帧），已保留原始数据`;
+    }
   } else {
     const r = await optimizeRaster(raw, info.ext, opt);
     finalBuffer = r.buffer;
@@ -338,6 +376,7 @@ async function processImage(raw, opt) {
     vector,
     optimized,
     resized,
+    convertedFrom,
     note,
     sha256: sha256(finalBuffer),
     thumbBuffer,

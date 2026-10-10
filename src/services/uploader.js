@@ -127,6 +127,9 @@ async function storeFile({ file, isAdmin, clientIp = '', ua = '', req }) {
     maxHeight: config.maxHeight,
     thumbnailWidth: Number(settings.get('thumbnail_width')) || 480,
     svgMinify: config.svgMinify,
+    // 动画 GIF → 动画 WebP 无法在浏览器完成（canvas 只能编码单帧），
+    // 复用「客户端转 WebP」开关作为站点级转 WebP 策略，由服务端代做
+    convertAnimatedGif: !!settings.get('client_convert_webp'),
   });
   timings.processMs = Date.now() - processStart;
 
@@ -203,6 +206,8 @@ async function storeFile({ file, isAdmin, clientIp = '', ua = '', req }) {
   const dto = toDTO(row, base);
   // 仅本次新建的记录签发删除凭证：前端凭它即可清理自己刚上传的这一张
   dto.delete_key = computeDeleteKey(row.id, row.sha256);
+  // 服务端代做的格式转换（动画 GIF -> 动画 WebP）：前端据此显示转换徽标
+  if (result.convertedFrom) dto.converted_from = result.convertedFrom;
 
   return { dto, duplicated: false, optimized: result };
 }

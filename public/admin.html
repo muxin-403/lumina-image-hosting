@@ -245,9 +245,9 @@
                 <label class="switch">
                   <input type="checkbox" id="s-client-webp" data-key="client_convert_webp" data-type="bool" />
                   <span class="track" aria-hidden="true"></span>
-                  <span>上传前在浏览器内把 JPG / PNG / BMP 转成 WebP（服务端零开销）</span>
+                  <span>上传前在浏览器内把 JPG / PNG / BMP / 静态 GIF 转成 WebP（服务端零开销）</span>
                 </label>
-                <div class="desc">GIF 动图、SVG 矢量、AVIF 不参与转换；转换后无体积收益时自动保留原格式。</div>
+                <div class="desc">SVG 矢量、AVIF 不参与转换；动画 GIF 由服务端转码（保留帧序与循环）；转换后无体积收益时自动保留原格式。</div>
               </div>
               <div class="field">
                 <label>客户端压缩</label>
@@ -256,12 +256,12 @@
                   <span class="track" aria-hidden="true"></span>
                   <span>转换时按下方质量参数做有损压缩</span>
                 </label>
-                <div class="desc">默认关闭：仅转换格式，质量按 100 处理，不做有损压缩。</div>
+                <div class="desc">默认关闭：PNG / BMP 走无损转换；JPG / 静态 GIF 无损压不过原格式，会按下方质量参数编码以保证能转换。</div>
               </div>
               <div class="field">
                 <label for="s-client-quality">WebP 质量</label>
                 <input type="number" id="s-client-quality" data-key="client_webp_quality" data-type="int" min="40" max="100" />
-                <div class="desc">40–100，越高越清晰、体积越大；仅在开启「客户端压缩」时生效。</div>
+                <div class="desc">40–100，越高越清晰、体积越大；开启压缩时对所有参与转换的格式生效。</div>
               </div>
               <div class="field">
                 <label for="s-client-concurrency">同时上传张数</label>

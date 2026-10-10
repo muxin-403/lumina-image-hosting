@@ -525,10 +525,13 @@ curl -X PATCH http://localhost:3000/api/settings \
 | --- | --- | --- |
 | JPEG | `.jpg` `.jpeg` | EXIF 自动转向 → 超尺寸等比缩小 → mozjpeg 有损再压缩 |
 | PNG | `.png` | 无损再压缩（`compressionLevel: 9`），保留透明通道 |
-| GIF | `.gif` | 静态：按原格式处理；**动态：原样保留全部帧** |
+| GIF | `.gif` | 静态：客户端转 WebP；**动态：服务端转动画 WebP（保留全部帧、每帧延时与循环）**，转码无收益或失败时原样保留 |
 | WebP | `.webp` | 静态再压缩；动画 WebP 原样保留 |
 | SVG | `.svg` | **保持矢量，绝不栅格化**；仅做安全精简（去注释/脚本/事件属性） |
 | AVIF | `.avif` | 静态再压缩；动画 AVIF 原样保留 |
 
-> **WebP 转换在前端完成**：上传页的「客户端转 WebP」使用 Canvas `toBlob('image/webp')`，
-> 服务端零算力开销。GIF / SVG / AVIF 会自动跳过（转换会破坏动画或矢量特性）。
+> **WebP 转换在前端完成后端补充**：上传页的「客户端转 WebP」使用 Canvas `toBlob('image/webp')`，
+> 服务端零算力开销。PNG / BMP 走无损编码；JPG / 静态 GIF 无损压不过原格式，
+> 按管理台配置的质量做有损编码。动画 GIF 因浏览器只能编码单帧 WebP，
+> 在服务端用 sharp 转为动画 WebP（保留全部帧、每帧延时与循环次数）。
+> SVG / AVIF 自动跳过（转换会破坏矢量特性），转换后无体积收益时自动保留原格式。

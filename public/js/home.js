@@ -161,16 +161,72 @@
   const CONVERT_MAX_PIXELS = 4096 * 4096;
 
   /**
-   * 在浏览器内把 JPG/PNG/BMP 转成 WebP：
+   * 判断 GIF 是否为动画：完整遍历 GIF 块结构，统计图像描述符（0x2C）数量，
+   * 超过 1 帧即为动画。动画 GIF 不参与转换 —— canvas 解码只会留下第一帧。
+   * 结构无法解析或体积异常大时保守按动画处理（放弃转换，绝不含糊地丢帧）。
+   */
+  async function isAnimatedGif(file) {
+    // 超大 GIF（> 32MB）不值得为转码整读进内存，保守视为动画直接跳过
+    if (file.size > 32 * 1024 * 1024) return true;
+    try {
+      const buf = new Uint8Array(await file.arrayBuffer());
+      if (buf.length < 14 || String.fromCharCode(buf[0], buf[1], buf[2]) !== 'GIF') return false;
+      let p = 13; // 跳过 6 字节签名 + 7 字节逻辑屏幕描述符（宽/高/标志/背景色/宽高比）
+      if (buf[10] & 0x80) p += 3 * (2 ** ((buf[10] & 0x07) + 1)); // 跳过全局色表
+      let frames = 0;
+      while (p < buf.length) {
+        const b = buf[p++];
+        if (b === 0x3B) break;            // 文件结束符
+        if (b === 0x21) {
+          p += 1;                          // 扩展块：跳过 label，后面跟子块序列
+        } else if (b === 0x2C) {
+          frames += 1;                     // 图像描述符：每出现一次就是一帧
+          const lct = buf[p + 8];          // 描述符第 9 字节是标志位
+          p += 9;                          // left/top/width/height + 标志位
+          if (lct & 0x80) p += 3 * (2 ** ((lct & 0x07) + 1)); // 跳过局部色表
+          p += 1;                          // LZW 最小编码长度字节
+        } else {
+          return true;                     // 非法块结构：保守按动画处理
+        }
+        // 扩展块与图像数据后面都是「子块序列」：长度字节 + 数据，0 长度即结束
+        while (p < buf.length) {
+          const len = buf[p++];
+          if (!len) break;
+          p += len;
+        }
+      }
+      return frames > 1;
+    } catch (_) {
+      return true; // 读取失败时宁可放弃转换，也不冒丢动画的风险
+    }
+  }
+
+  /** 把画布内容编码为 WebP Blob（toBlob 回调风格转 Promise，失败时返回 null） */
+  function encodeWebp(canvas, quality) {
+    return new Promise((resolve) => canvas.toBlob(resolve, 'image/webp', quality));
+  }
+
+  /**
+   * 在浏览器内把 JPG/PNG/BMP/静态 GIF 转成 WebP：
    *  - 服务端零算力消耗，上传体积更小、更快
-   *  - GIF（动图）、SVG（矢量）、AVIF 直接跳过：canvas 会破坏动画/矢量特性，
+   *  - 动画 GIF、SVG（矢量）、AVIF 直接跳过：canvas 会破坏动画/矢量特性，
    *    AVIF 本身通常已比 WebP 更小
    *  - 位图与画布的底层内存在所有路径上（含异常）都立即归还，不等 GC
+   *
+   * quality / lossyFallback 的语义（与 Chromium 的 toBlob 行为对齐）：
+   *  - Chromium 把 quality = 1 的 image/webp 编码成「无损 WebP」。PNG / BMP
+   *    走无损即可稳定获得体积收益；但 JPEG（有损压缩源）与 GIF（调色板源）
+   *    无损压不过原文件 —— 这正是此前「除 PNG 外全都不转换」的根因：
+   *    默认配置（client_compress 关闭）下 quality 恒为 1，JPEG/GIF 编码出的
+   *    无损 WebP 比原文件更大，被「无收益不上传」守卫拦下，只有 PNG 能转。
+   *  - 因此对 JPEG / 静态 GIF 直接按 lossyFallback（管理台配置的质量，上限
+   *    0.99）做有损编码；PNG / BMP 维持无损路径，行为与之前完全一致。
    */
-  async function convertToWebp(file, quality) {
-    const convertible = ['image/jpeg', 'image/png', 'image/bmp', 'image/jpg'];
+  async function convertToWebp(file, quality, lossyFallback = 0) {
+    const convertible = ['image/jpeg', 'image/jpg', 'image/png', 'image/bmp', 'image/gif'];
     if (!convertible.includes(file.type)) return { file, converted: false };
     if (typeof createImageBitmap !== 'function') return { file, converted: false };
+    if (file.type === 'image/gif' && await isAnimatedGif(file)) return { file, converted: false };
 
     let bitmap = null;
     try {
@@ -188,7 +244,15 @@
       const ctx = canvas.getContext('2d');
       ctx.drawImage(bitmap, 0, 0);
 
-      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/webp', quality));
+      // 无损友好的源（PNG / BMP）保持原有无损路径；JPEG / 静态 GIF 用有损质量。
+      // 0.99 上限规避 Chromium 的 quality=1 → 无损编码特例，同时视觉上不可辨。
+      const losslessFriendly = file.type === 'image/png' || file.type === 'image/bmp';
+      const lossyQuality = Math.min(Number(lossyFallback) || 0, 0.99);
+      const effectiveQuality = (losslessFriendly || !(lossyQuality > 0 && lossyQuality < 1))
+        ? quality
+        : lossyQuality;
+
+      const blob = await encodeWebp(canvas, effectiveQuality);
 
       // 编码结果已拿到，立刻归还画布的 backing store（置 0 是各浏览器通用的释放手法）
       canvas.width = 0;
@@ -360,6 +424,7 @@
       retryTimer: null, // 自动重试的 setTimeout 句柄（删除任务 / 手动重试时清除）
       retryAt: 0,       // 下次自动重试的时间戳（倒计时展示用）
       quality: 1,       // 客户端转码质量（handleFiles 时按配置写入，重试沿用）
+      lossyFallback: 0, // 无损压不过原文件时的有损兜底质量（JPEG / 静态 GIF 用）
 
       // 阶段耗时埋点：只记时间戳与字节数，不记文件名（详见 recordPerf）
       timings: { queuedAt: perfNow() },
@@ -401,6 +466,10 @@
         // 显示真实节省量而非笼统的「省空间」：转换收益一目了然
         const saved = Number(item._clientSavedBytes) || 0;
         badge.push(`<span class="badge ok">已转 WebP${saved > 0 ? ` · 省 ${formatSize(saved)}` : ' 省空间'}</span>`);
+      }
+      if (item.converted_from === 'gif') {
+        // 浏览器端转不动动画（canvas 只能编码单帧），动画 GIF 由服务端转码
+        badge.push('<span class="badge ok">动画 GIF 已转 WebP</span>');
       }
       if (item.compression && item.compression.saved_bytes > 0) {
         badge.push(`<span class="badge ok">已压缩 −${item.compression.saved_percent}%</span>`);
@@ -753,7 +822,7 @@
         renderTask(task);
 
         task.timings.convertStart = perfNow();
-        const r = await convertToWebp(task.raw, quality);
+        const r = await convertToWebp(task.raw, quality, task.lossyFallback);
         task.timings.convertEnd = perfNow();
         if (task.removed) return;
 
@@ -1023,14 +1092,23 @@
       toast(`单次最多 ${maxFiles} 个文件，本次仅上传前 ${maxFiles} 个`, 'info', 4000);
     }
 
-    // 压缩策略由管理台配置：未开启压缩时按最高质量编码（仅转格式、不做有损压缩）
+    // 压缩策略由管理台配置：未开启压缩时 PNG / BMP 按无损编码（仅转格式、
+    // 不做有损压缩）；JPEG / 静态 GIF 的无损编码压不过原文件，必须按配置
+    // 质量做有损编码，否则默认配置下除 PNG 外永远转换不了（见 convertToWebp）。
+    const configuredQuality = Math.min(100, Math.max(40, Number(config.client_webp_quality) || 82)) / 100;
     const quality = config.client_convert_webp && config.client_compress
-      ? Math.min(100, Math.max(40, Number(config.client_webp_quality) || 82)) / 100
+      ? configuredQuality
       : 1;
+    const lossyFallback = config.client_convert_webp && config.client_compress
+      ? 0 // 压缩开启时 quality 本身已是有损质量，无需兜底
+      : configuredQuality;
 
     // 1) 建任务 + 立即上屏：每张图片各有一条自己的进度条
     const batchTasks = batch.map((raw) => createTask(raw));
-    for (const t of batchTasks) t.quality = quality; // 重试时沿用本批次的转码策略
+    for (const t of batchTasks) {
+      t.quality = quality;             // 重试时沿用本批次的转码策略
+      t.lossyFallback = lossyFallback; // 有损兜底质量同样随批次固定
+    }
     tasks.push(...batchTasks);
     appendTaskCards(batchTasks);
 
