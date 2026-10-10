@@ -270,6 +270,10 @@ router.get(
   }),
 );
 
+/* ---------------------------- 首页（产品介绍页） ---------------------------- */
+
+router.get(['/home', '/home/'], (_req, res) => res.sendFile(path.join(config.publicDir, 'home.html')));
+
 /* ---------------------------- 管理台入口 ---------------------------- */
 
 router.get('/admin', (_req, res) => res.sendFile(path.join(config.publicDir, 'admin.html')));
@@ -351,7 +355,7 @@ router.get(
       <span>Lumina 图床</span><small>API 文档</small>
     </a>
     <nav class="topnav">
-      <a href="/">上传</a><a href="/admin">管理台</a>
+      <a href="/home">首页</a><a href="/">上传</a><a href="/admin">管理台</a>
       <a href="/api-docs" class="active">API 文档</a>
     </nav>
   </header>

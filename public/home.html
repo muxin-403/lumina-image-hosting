@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Lumina 图床 · 轻量级自托管图床</title>
+  <meta name="description" content="Lumina —— 轻量级自托管图床：拖拽即上传，本地与 WebDAV 双存储，四种引用格式一键复制，完整 RESTful API。零前端构建，克隆即跑。" />
+  <meta name="theme-color" content="#2f6feb" />
+  <meta property="og:title" content="Lumina 图床" />
+  <meta property="og:description" content="轻量级自托管图床：拖拽即上传，本地 / WebDAV 双存储，完整 RESTful API。" />
+  <meta property="og:type" content="website" />
+  <link rel="icon" href="/favicon.ico" />
+  <link rel="stylesheet" href="/css/style.css" />
+  <style>
+    /* ==================== 首页（landing）专属样式 ====================
+       全部颜色 / 圆角 / 阴影 / 字体复用 style.css 中的设计令牌，
+       仅新增布局类，不引入新调色板，保证与上传页 / 管理台观感一致。 */
+
+    .home-wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px 80px; }
+
+    /* ---------- 主视觉区 ---------- */
+    .hero-home {
+      text-align: center;
+      padding: 72px 0 44px;
+    }
+    .hero-home .eyebrow {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 5px 14px; border-radius: 99px;
+      background: var(--brand-soft); color: var(--brand);
+      font-size: 13px; font-weight: 600;
+      border: 1px solid color-mix(in srgb, var(--brand) 18%, transparent);
+    }
+    .hero-home .eyebrow .dot {
+      width: 7px; height: 7px; border-radius: 50%; background: var(--success);
+    }
+    .hero-home h1 {
+      margin: 22px auto 0;
+      font-size: clamp(30px, 5.4vw, 46px);
+      letter-spacing: -0.02em; line-height: 1.22;
+      max-width: 720px;
+    }
+    .hero-home h1 em {
+      font-style: normal;
+      background: linear-gradient(92deg, var(--brand), #57c2ff);
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent; color: var(--brand);
+    }
+    .hero-home .sub {
+      margin: 16px auto 0; max-width: 560px;
+      color: var(--text-soft); font-size: 16px; line-height: 1.7;
+    }
+    .hero-home .cta {
+      display: flex; justify-content: center; gap: 12px; flex-wrap: wrap;
+      margin-top: 30px;
+    }
+    .hero-home .cta .btn { padding: 11px 22px; font-size: 15px; border-radius: 11px; }
+    .hero-home .cta .btn.primary { box-shadow: 0 8px 22px var(--brand-ring); }
+
+    /* 上传流程示意条：拖入 → 自动优化 → 多格式直链 */
+    .flow {
+      display: grid; grid-template-columns: 1fr auto 1fr auto 1fr;
+      align-items: center; gap: 10px;
+      max-width: 720px; margin: 48px auto 0;
+      padding: 18px 22px;
+    }
+    .flow .step { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .flow .step .fi {
+      flex: none; width: 38px; height: 38px; border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      background: var(--brand-soft); color: var(--brand);
+    }
+    .flow .step .fi svg { width: 20px; height: 20px; }
+    .flow .step b { display: block; font-size: 13.5px; font-weight: 600; }
+    .flow .step small { display: block; color: var(--text-muted); font-size: 12px; }
+    .flow .arrow { color: var(--text-muted); flex: none; }
+    .flow .arrow svg { width: 16px; height: 16px; display: block; }
+
+    /* ---------- 数据条 ---------- */
+    .metrics {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px;
+      margin: 34px 0 0;
+    }
+    .metric { text-align: center; padding: 18px 10px; }
+    .metric .num { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+    .metric .num sup { font-size: 14px; font-weight: 600; color: var(--text-muted); }
+    .metric .cap { font-size: 12.5px; color: var(--text-muted); margin-top: 4px; }
+
+    /* ---------- 通用分区块 ---------- */
+    .home-section { margin-top: 64px; }
+    .home-section-head { text-align: center; max-width: 620px; margin: 0 auto 30px; }
+    .home-section-head h2 { font-size: clamp(22px, 3vw, 28px); }
+    .home-section-head p { color: var(--text-soft); font-size: 14.5px; margin: 10px 0 0; }
+
+    /* ---------- 核心功能网格 ---------- */
+    .features {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px;
+    }
+    .feature { padding: 22px 20px; transition: box-shadow .18s, transform .18s; }
+    .feature:hover { box-shadow: var(--shadow); transform: translateY(-2px); }
+    .feature .fi {
+      width: 42px; height: 42px; border-radius: 11px;
+      display: flex; align-items: center; justify-content: center;
+      background: var(--brand-soft); color: var(--brand); margin-bottom: 14px;
+    }
+    .feature .fi svg { width: 22px; height: 22px; }
+    .feature h3 { font-size: 15.5px; }
+    .feature p { color: var(--text-soft); font-size: 13.5px; margin: 8px 0 0; line-height: 1.65; }
+
+    /* ---------- 快速开始 ---------- */
+    .quickstart { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .qs-card { padding: 20px; }
+    .qs-card h3 { display: flex; align-items: center; gap: 8px; font-size: 15px; }
+    .qs-card .qs-note { color: var(--text-muted); font-size: 12.5px; margin: 6px 0 12px; }
+    .codebox { position: relative; }
+    .codebox pre {
+      margin: 0; padding: 14px 44px 14px 16px; overflow-x: auto;
+      background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); font-family: var(--mono);
+      font-size: 12.5px; line-height: 1.7; color: var(--text);
+      white-space: pre;
+    }
+    .codebox pre .c { color: var(--text-muted); }
+    .codebox .btn.copy-code {
+      position: absolute; top: 8px; right: 8px; padding: 4px 9px; font-size: 12px;
+    }
+
+    /* ---------- 技术栈徽标 ---------- */
+    .stack-badges {
+      display: flex; justify-content: center; flex-wrap: wrap; gap: 8px;
+      margin-top: 18px;
+    }
+    .stack-badges .badge { font-size: 12px; padding: 4px 12px; }
+
+    /* ---------- 响应式 ---------- */
+    @media (max-width: 860px) {
+      .features { grid-template-columns: repeat(2, 1fr); }
+      .quickstart { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 700px) {
+      .home-wrap { padding: 0 14px 60px; }
+      .hero-home { padding: 48px 0 32px; }
+      .hero-home .cta .btn { flex: 1 1 auto; }
+      .flow { grid-template-columns: 1fr; gap: 12px; padding: 16px; }
+      .flow .arrow { transform: rotate(90deg); justify-self: center; }
+      .metrics { grid-template-columns: repeat(2, 1fr); }
+      .features { grid-template-columns: 1fr; }
+      .home-section { margin-top: 48px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .feature { transition: none; }
+      .feature:hover { transform: none; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主内容</a>
+
+  <header class="topbar">
+    <a class="brand" href="/home">
+      <svg class="logo" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+        <rect x="2" y="2" width="28" height="28" rx="8" fill="#2f6feb" />
+        <circle cx="16" cy="15" r="6.5" stroke="#fff" stroke-width="2" />
+        <path d="M11 24l3.4-4.2 2.4 2.6 2.6-3.2L23 24" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
+      <span id="brand-name">Lumina 图床</span>
+      <small>自托管 · 无框架</small>
+    </a>
+    <nav class="topnav" aria-label="站点导航">
+      <a href="/home" class="active">首页</a>
+      <a href="/">上传</a>
+      <a href="/admin">管理台</a>
+      <a href="/api-docs" target="_blank" rel="noopener">API 文档</a>
+    </nav>
+  </header>
+
+  <main id="main" class="home-wrap">
+    <!-- ============ 主视觉区 ============ -->
+    <section class="hero-home" aria-label="站点简介">
+      <span class="eyebrow"><span class="dot" aria-hidden="true"></span>开源自托管 · MIT 协议</span>
+      <h1>拖进来，就上传，<em>立刻拿到直链</em></h1>
+      <p class="sub">Lumina 是一个轻量级自托管图床：支持本地磁盘与 WebDAV 网盘双存储、
+        自动图像优化与秒传去重，并提供完整的 RESTful API 供程序化调用。</p>
+      <div class="cta">
+        <a class="btn primary" href="/">立即上传 →</a>
+        <a class="btn" href="/api-docs" target="_blank" rel="noopener">查看 API 文档</a>
+      </div>
+
+      <div class="flow card" aria-label="上传流程示意">
+        <div class="step">
+          <span class="fi" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>
+          </span>
+          <span><b>拖入图片</b><small>拖拽 · 批量 · 粘贴</small></span>
+        </div>
+        <span class="arrow" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg>
+        </span>
+        <div class="step">
+          <span class="fi" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></svg>
+          </span>
+          <span><b>自动优化</b><small>压缩 · 秒传 · 去重</small></span>
+        </div>
+        <span class="arrow" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg>
+        </span>
+        <div class="step">
+          <span class="fi" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </span>
+          <span><b>一键复制</b><small>直链 · HTML · MD · BBCode</small></span>
+        </div>
+      </div>
+
+      <div class="metrics" aria-label="项目关键数据">
+        <div class="metric card"><div class="num">5<sup>个</sup></div><div class="cap">生产依赖</div></div>
+        <div class="metric card"><div class="num">0</div><div class="cap">前端构建步骤</div></div>
+        <div class="metric card"><div class="num">7<sup>种</sup></div><div class="cap">支持图片格式</div></div>
+        <div class="metric card"><div class="num">3<sup>种</sup></div><div class="cap">存储模式可切换</div></div>
+      </div>
+    </section>
+
+    <!-- ============ 核心功能 ============ -->
+    <section class="home-section" aria-label="核心功能">
+      <div class="home-section-head">
+        <h2>为自托管而生的完整能力</h2>
+        <p>从一个可执行文件到一套可编程的图片服务，该有的都有，不该有的没有。</p>
+      </div>
+      <div class="features">
+        <article class="feature card">
+          <span class="fi" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>
+          </span>
+          <h3>三种上传方式</h3>
+          <p>拖拽、批量选择、剪贴板粘贴均可上传；客户端可选自动转 WebP，多任务并发由页面级调度统一控速。</p>
+        </article>
+        <article class="feature card">
+          <span class="fi" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </span>
+          <h3>多格式引用一键复制</h3>
+          <p>直链、HTML、Markdown、BBCode（含缩略图变体共 8 种）由服务端直接拼好，切 Tab 即取，论坛博客写作无缝衔接。</p>
+        </article>
+        <article class="feature card">
+          <span class="fi" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+          </span>
+          <h3>本地 + WebDAV 双存储</h3>
+          <p>本地磁盘、远端网盘、双写备份三种模式运行时热切换；直链恒走本站代理，网盘真实地址与凭据绝不外泄。</p>
+        </article>
+        <article class="feature card">
+          <span class="fi" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+          </span>
+          <h3>完整 RESTful API</h3>
+          <p>上传、列表、删除、统计、热配置全部开放，附 cURL / Python / Node 三种客户端示例与在线文档，curl 一行即可调用。</p>
+        </article>
+        <article class="feature card">
+          <span class="fi" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></svg>
+          </span>
+          <h3>自动优化与秒传</h3>
+          <p>Sharp 按 EXIF 转向、超尺寸缩放、再压缩，且负优化保护；动图保帧、SVG 保矢量；相同内容 sha256 秒传去重。</p>
+        </article>
+        <article class="feature card">
+          <span class="fi" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+          </span>
+          <h3>轻量管理台</h3>
+          <p>登录后即可筛选、删除图片，修改站点名、游客限额、存储驱动等配置，改完即生效，全程无需重启进程。</p>
+        </article>
+      </div>
+
+      <div class="stack-badges" aria-label="技术栈">
+        <span class="badge info">Node.js ≥ 18</span>
+        <span class="badge">Express 4</span>
+        <span class="badge">SQLite</span>
+        <span class="badge">Sharp</span>
+        <span class="badge">原生 HTML / CSS / JS</span>
+        <span class="badge">Docker 多架构</span>
+      </div>
+    </section>
+
+    <!-- ============ 快速开始 ============ -->
+    <section class="home-section" aria-label="快速开始">
+      <div class="home-section-head">
+        <h2>两分钟部署到自己的服务器</h2>
+        <p>无 ORM、无第三方鉴权库，克隆下来装好依赖就能跑。</p>
+      </div>
+      <div class="quickstart">
+        <div class="qs-card card">
+          <h3>本地直接运行</h3>
+          <p class="qs-note">适合先体验：默认端口 3000，上传页 <code class="mono">/</code>，管理台 <code class="mono">/admin</code></p>
+          <div class="codebox">
+            <pre><code id="code-npm"><span class="c"># 克隆并安装依赖</span>
+git clone https://github.com/muxin-403/lumina-image-hosting.git
+cd lumina-image-hosting
+npm install
+
+# 启动服务
+npm start</code></pre>
+            <button class="btn sm copy-code" type="button" data-copy-target="code-npm">复制</button>
+          </div>
+        </div>
+        <div class="qs-card card">
+          <h3>Docker 一条命令</h3>
+          <p class="qs-note">多架构镜像（amd64 / arm64），数据落在 <code class="mono">./data</code> 与 <code class="mono">./storage</code></p>
+          <div class="codebox">
+            <pre><code id="code-docker"><span class="c"># 拉取并启动（请替换管理员密码）</span>
+docker run -d --name lumina \
+  -p 3000:3000 \
+  -v "$PWD/data:/app/data" \
+  -v "$PWD/storage:/app/storage" \
+  -e ADMIN_PASSWORD='换成一个强密码' \
+  ghcr.io/muxin-403/lumina-image-hosting:latest</code></pre>
+            <button class="btn sm copy-code" type="button" data-copy-target="code-docker">复制</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    Lumina 图床 · 开源自托管项目 · <a href="/api-docs">API 文档</a>
+  </footer>
+
+  <script src="/js/common.js"></script>
+  <script>
+    (function () {
+      'use strict';
+
+      /* 站点名跟随管理台配置（/api/config 公开接口，仅此一项动态内容） */
+      Lumina.request('/api/config', { auth: false }).then(function (cfg) {
+        if (cfg && cfg.site_name) {
+          document.getElementById('brand-name').textContent = cfg.site_name;
+          document.title = cfg.site_name + ' · 轻量级自托管图床';
+        }
+      }).catch(function () { /* 配置拉取失败不影响静态展示 */ });
+
+      /* 代码块一键复制（复用公共库剪贴板能力，http 环境自动回退 execCommand） */
+      document.querySelectorAll('.copy-code').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var code = document.getElementById(btn.getAttribute('data-copy-target'));
+          if (code) Lumina.copyWithToast(code.textContent, '已复制到剪贴板');
+        });
+      });
+    })();
+  </script>
+</body>
+</html>
