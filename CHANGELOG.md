@@ -10,15 +10,28 @@
 
 ## [未发布]
 
+## [1.5.0] - 2026-10-10
+
 ### 功能新增
+
+- **动画 GIF → 动画 WebP（服务端转码）**：浏览器 Canvas 只能编码单帧 WebP，动画 GIF 的转码由服务端用 sharp（libvips）完成——以 `animated` 模式读入全部帧，每帧延时与循环次数一并写入 WebP 容器，帧数与播放效果保持不变。
+  - 复用管理台「客户端转 WebP」开关作为站点级转 WebP 策略：开启时动画 GIF 上传后自动转为动画 WebP；仅当允许格式包含 webp 且转码后体积确实更小时生效，转码失败或无收益时原样保留 GIF（负优化保护），不会因转换失败导致上传出错。
+  - 上传响应新增 `converted_from: "gif"` 字段，完成卡片显示「动画 GIF 已转 WebP」徽标；`compression` 携带转换前后的体积对比。
+  - 命名与存储：物理文件按 `yyyy/mm/<短ID>.webp` 写入当前存储驱动（本地 / WebDAV / hybrid），缩略图恒存本地 `storage/_thumbs`（取第一帧做封面）；数据库 `ext / mime` 更新为 webp、`pages` 保留帧数、`animated=1`，`original_name` 保留用户上传时的原始文件名。
+
+### 问题修复
+
+- **修复客户端 WebP 转换在默认配置下除 PNG 外全部失效（仅 PNG 能转）**：`client_compress` 关闭（默认）时编码质量恒为 1，而 Chromium 会把 `canvas.toBlob('image/webp', 1)` 编码为**无损 WebP**——PNG 无损仍能变小，但 JPEG（有损压缩源）编出的无损 WebP 几乎必然比原文件更大，被「无体积收益不上传」守卫拦下、按原格式上传，最终表现即「仅 PNG 正常转换」。
+  - 根因与浏览器编码行为相关，而非格式白名单缺失（`image/jpeg` / `image/bmp` 本就在白名单内）。
+  - 修复：PNG / BMP 维持原无损路径，行为与之前完全一致；JPEG（`.jpg` / `.jpeg`）与静态 GIF 改按管理台 `client_webp_quality` 做有损编码（上限 0.99，规避 quality=1 的无损特例），保证能产生体积收益。
+  - **静态 GIF 纳入客户端转换**：新增 `isAnimatedGif()`——完整遍历 GIF 块结构、统计图像描述符帧数判断是否动画；动画 GIF 依旧跳过（Canvas 只会留下第一帧），静态 GIF 正常转换；结构无法解析或超 32MB 时保守按动画处理，绝不冒丢帧风险。原有「无收益不上传」「总像素预算」「位图 / 画布内存即时释放」等守卫全部保留。
+  - 管理台「客户端转 WebP / 压缩 / 质量」三项说明与 `docs/API.md` 格式支持文档同步更新。
 
 - **上传失败自动重试机制（重试队列 + 批量重试）**：可重试的失败（网络错误 / HTTP 5xx / 408 / 429）自动进入重试队列，按**指数退避**（3s → 6s → 12s）自动重试，每轮最多 3 次；校验类失败（格式不支持、空文件）与 4xx 业务错误（未授权、文件过大等）重试无意义，直接停在失败态交由用户决定。
   - 失败卡片换用**醒目的红色「上传失败」徽标**（带脉冲圆点动画，遵循 `prefers-reduced-motion`），并显示失败原因、尝试次数与重试提示；等待重试时展示逐秒倒计时与本轮进度（如「1/3」）。
   - 每张失败卡片提供单张**「重试 / 立即重试」**按钮（等待重试中可跳过倒计时）；列表头部新增**「批量重试（N）」**按钮，一次性重试所有失败图片（含等待自动重试的），数量实时联动、全部成功后自动隐藏。
   - 重试沿用页面级全局并发调度器（`client_max_concurrency` 统一约束），不会挤占在途请求；重试走完整状态流（排队 → 转码 → 上传 → 服务端处理），进度条与状态实时刷新，成功 / 失败即时更新徽标。手动重试会开启新一轮自动重试周期。
   - 删除任务时同步清理未触发的重试定时器；自动重试到点前任务可随时取消。
-
-### 问题修复
 
 - **修复 Node 24 上服务启动即原生崩溃（CI 测试套件 Node 24 矩阵失败）**：`better-sqlite3` 由 `^11.10.0` 升级至 `^13.0.3`。
   - 根因是 Node 上游回归（nodejs/node#65195）：Node 24.19+ 在 GC / 退出清理路径中对存活的 `node::ObjectWrap` 触发 use-after-free，`node::RemoveEnvironmentCleanupHook` 断言 `(env) != nullptr` 失败 → 进程直接 abort（服务端日志仅有「SQLite 已就绪」一行，无任何 JS 层错误）。better-sqlite3 11.x / 12.x 基于 ObjectWrap 实现全部受影响；Node 22 不受该回归影响。
@@ -30,6 +43,16 @@
   - better-sqlite3 13.x 的 prebuilt 二进制随 npm 包自带（`prebuilds/linux-x64|arm64|.node`），且声明 `gypfile: false`、无任何安装脚本；但 npm 10（node:22 镜像自带 npm）见到包内 `binding.gyp` 仍会注入隐式 `node-gyp rebuild`（lockfile 不携带 `gypfile:false`，npm 11 起才修复此行为），configure 需要的 Python 3 与 Node 源码头在 slim 镜像中不存在 → 构建失败。
   - 本项目全部依赖无任何 `install / preinstall / postinstall` 脚本（已核对 lockfile 全量 0 项），`--ignore-scripts` 零副作用，直接命中包内 prebuilds，安装更快更稳。
   - 验证：`npm ci --omit=dev --ignore-scripts` 全新安装后冷启动 + 真实上传 / 删除冒烟通过（SQLite 与 Sharp 均直接加载预编译产物）。
+
+### 优化调整
+
+- 版本号对齐：`package.json` / `package-lock.json` 由 `1.4.0` 提升至 `1.5.0`，与本文档最新版本一致。
+
+### 文档
+
+- `examples/smoke-test.js`：适配动画 GIF 服务端转码的新行为——上传结果按 `converted_from === 'gif'` 识别，断言动画 WebP 的 RIFF/WEBP 文件头与转换标记；开关关闭时仍按原 GIF 格式断言（两种模式兼容）。
+- `examples/ui-check.js`：3.2 节拆分——SVG / AVIF 仍断言客户端原样上传；动画 GIF 改为断言「客户端跳过转码、服务端转为动画 WebP」及结果卡片「动画 GIF 已转 WebP」徽标。
+- 验证：隔离数据目录 + 三套测试 **63 / 32 / 113 共 208 项 0 失败**（Node v22.22.2，含真实上传链路中动画 GIF → 动画 WebP 的转码与回读校验）。
 
 ## [1.4.0] - 2026-10-07
 
@@ -162,14 +185,16 @@
 
 | 版本 | 发布日期 | 主要变更 | 提交区间 |
 | --- | --- | --- | --- |
-| [1.4.0] | 2026-10-07 | 页面级全局并发调度、「服务端处理中」真实阶段反馈、大图像素预算与资源释放、两端分阶段耗时埋点 | `a3f9669`...`HEAD` |
+| [1.5.0] | 2026-10-10 | 上传失败自动重试机制、客户端 WebP 转换修复（含静态 GIF）、动画 GIF 服务端转动画 WebP | `3a12120`...`HEAD` |
+| [1.4.0] | 2026-10-07 | 页面级全局并发调度、「服务端处理中」真实阶段反馈、大图像素预算与资源释放、两端分阶段耗时埋点 | `c7d7885`...`3a12120` |
 | [1.3.0] | 2026-09-19 | 上传列表逐张进度与单张删除（含删除凭证 `delete_key`）、全站界面可读性优化 | `28e4a68`...`c7d7885` |
 | [1.2.0] | 2026-09-19 | 批量上传并发化（`client_max_concurrency`）、管理台表头重叠修复 | `7c6f6ab`...`a5b6161` |
 | [1.1.0] | 2026-09-18 | 自定义站点图标、WebDAV 直链全代理化、客户端上传行为可配置 | `66c64a8`...`7c6f6ab` |
 | [1.0.0] | 2026-09-17 | 首次交付：核心图床功能、三存储驱动、多架构镜像流水线 | `f31d993`...`66c64a8` |
 
 [未发布]: https://github.com/muxin-403/lumina-image-hosting/compare/HEAD...HEAD
-[1.4.0]: https://github.com/muxin-403/lumina-image-hosting/compare/c7d7885...HEAD
+[1.5.0]: https://github.com/muxin-403/lumina-image-hosting/compare/3a12120...HEAD
+[1.4.0]: https://github.com/muxin-403/lumina-image-hosting/compare/c7d7885...3a12120
 [1.3.0]: https://github.com/muxin-403/lumina-image-hosting/compare/a5b6161...c7d7885
 [1.2.0]: https://github.com/muxin-403/lumina-image-hosting/compare/66c64a8...a5b6161
 [1.1.0]: https://github.com/muxin-403/lumina-image-hosting/compare/f31d993...66c64a8
