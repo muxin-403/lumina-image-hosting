@@ -10,6 +10,54 @@
 
 ## [未发布]
 
+### 功能新增
+
+- **上传请求级总量预检**：multer 解析前先按 `Content-Length` 校验请求总量（上限 = 文件数上限 × 单文件上限 + 16KB multipart 开销），超限直接返回 `413 PAYLOAD_TOO_LARGE`。此前仅限单文件体积，游客单请求最多可缓冲 20×5MB=100MB 内存，少量并发即可打爆小内存主机；chunked（无 Content-Length）请求跳过预检，仍由 multer 单文件限额兜底。
+- **删除接口如实回报物理清理结果**：删除响应新增 `storage_removed`（物理文件与缩略图是否全部移除）与 `warnings`（失败原因）字段——此前 unlink 失败被静默吞掉，用户看到「删除成功」但文件仍占磁盘且直链仍可访问。记录本身照常删除，接口不会被存储异常卡死（既有语义不变）。
+- **新增 Bug 修复回归套件**：`examples/bugfix-test.js`（29 项断言，进程内自举隔离实例，覆盖流错误、删除语义、EXIF、HEIC、限流、配置断裂等全部本轮修复点）与 `examples/bugfix-crash-probe.js`（独立子进程验证「流错误不杀进程」，父进程只看退出码）；`npm run test:bugfix` 可单独运行，已并入 `npm test` 主链。
+
+### 问题修复
+
+- **修复文件服务流错误导致整个进程退出（可远程触发的全站宕机）**：本地直链的 `fs.createReadStream().pipe(res)` 与 WebDAV 代理转发流都没有 `error` 监听——`pipe()` 不转发错误，传输中途的上游断连、文件在 `existsSync` 检查后被删除（TOCTOU）、权限变化等都会以无人处理的 `'error'` 事件触发 `uncaughtException`，进程直接退出，全站不可用。
+  - 修复：`sendLocal` / `proxyRemote` 统一改用 `stream.pipeline()`（双向错误兜底 + 自动清理），未发送响应头时转为 500/502 明确错误，已发送则掐断连接；客户端提前断开时自动销毁源流，中止本地文件句柄与 WebDAV 上游连接。
+- **修复 `/api-docs` 所有引用块渲染成 `[object Object]`**：blockquote 分支把 `render()` 的返回值（`{ html, toc }` 对象）直接内插进模板字符串。文档页 6 处引用块（含页首说明）全部损坏，核心内容丢失。改为取 `.html`。
+- **修复 `/t/:id` 处理器未声明 `next` 却调用 `next()`**：缩略图与原图均缺失时应 404，实际抛 `ReferenceError` 被 500。签名补上 `next`。
+- **修复 `DELETE /api/settings/webdav_password` 在响应中回显明文密码**：reset 删除 DB 记录后 `settings.get` 回落到 `.env` 的 `WEBDAV_PASSWORD` 明文并原样返回——而 `GET /api/settings` 对同类项刻意只返回 `webdav_password_set` 布尔，删除接口成了脱敏体系的旁路。现在敏感项只返回布尔。
+- **修复 `.env` 的 `DEDUPE=0` 与 `WEBDAV_TIMEOUT` 静默失效**：dedupe 直读数据库原始层 `Settings.get('dedupe')`（DB 无记录时 `undefined !== false` 恒真，秒传恒开），未走「DB > .env > 默认值」配置门面；`webdav_timeout` 既不在配置默认值表也不在 PATCH 白名单，`WEBDAV_TIMEOUT` 解析结果从未被使用，超时恒为 30s。分别改走配置门面、补齐默认值键。
+- **修复 EXIF 旋转照片经服务端重编码后入库宽高转置**：`rotate()` 按 EXIF 烘焙方向后输出像素宽高互换（Orientation 5-8），但只有触发缩放的分支会重读尺寸——竖版手机照（4000×3000 + Orientation 6）重编码后详情页与列表显示为横版。现在只要字节被重写（缩放 / 方向烘焙 / 动图转码）就对最终 buffer 重读一次元数据。
+- **修复 HEIC/HEIF 照片被错标为 `.avif` 存储导致直链必然无法显示**：iPhone 默认的 HEIC 与 AVIF 同为 HEIF 容器，此前一律映射为 `avif` + `image/avif`；sharp 官方预编译不支持 HEVC 解码，重编码失败后保留 HEIC 原始字节却按 avif 落库，浏览器（Chrome/Firefox 均不支持 HEIC）解码必败。
+  - 现按用户可感知的方式明确拒绝：返回 `415 UNSUPPORTED_FORMAT`，提示「HEIC/HEIF 暂不支持，请先转为 JPG / PNG / WebP 后上传」。
+  - 关键细节：libvips 对 **AVIF 也报告为 `heif` 容器**，直接拒绝 `heif` 会误杀合法 AVIF——用 ftyp 品牌二次判别：major/compatible brand 声明 `avif`/`avis` 的放行，真正的 HEIC（HEVC 编码）才拒绝。
+- **修复删除接口按 sha256 误判「共享」留下永久孤儿文件**：秒传复用的是记录而非物理文件，同哈希的多条记录各自持有独立文件，「同哈希 ⇒ 共享文件」的前提从不成立——关闭去重或并发竞态产生同内容多记录时，先删的那条其物理文件与缩略图被永久跳过，且删空记录后无任何 API 可再触达。
+  - 共享判定改为 `storage_key` 引用计数；本记录专属的缩略图无论共享与否都会清理。
+  - 短 ID 主键碰撞（概率 ~54⁻¹⁰）时不再让已写入磁盘的文件成为孤儿：捕获约束冲突、回收本次文件并换新 ID 重试一次；`shortId` 改用拒绝采样消除取模偏差。
+- **修复 `TRUST_PROXY=true` 时限流 IP 可被伪造**：`X-Forwarded-For` 取最左段（客户端完全可控字段），配合「信任任意跳数」配置，攻击者每请求换一个伪造 IP 即可绕过登录爆破与上传限流，`uploader_ip` 审计同步失真。
+  - `TRUST_PROXY` 改为「可信代理层数」语义：`1/2/3…` 按实际层数解析，`true` 兼容旧写法视为 1 层；IP 统一取 Express `req.ip`（从右往左解析第一个不可信地址）。
+- **修复畸形 Cookie 导致所有请求 500**：`decodeURIComponent('%zz')` 抛 `URIError`，同步中间件内未捕获。同域其它子站可借 `document.cookie` 写入畸形值令管理台整体瘫痪。现在解码失败按原值处理、按匿名放行。
+- **修复 5xx 错误响应泄漏内部信息**：非业务异常（fs/sqlite/依赖库）的 `err.message` 常含绝对路径、SQL 片段，此前原样返回客户端。现在仅 `ApiError` 透传业务文案，其余 5xx 一律「服务器内部错误」。
+- **修复 `/api/v1` 限流每请求双计**：`/api` 与 `/api/v1` 两条独立挂载让版本化请求先命中 `/api` 前缀限流、fallthrough 后再计一次，配额静默减半。改为 `/api` 单挂载 + 内部 `/v1` 别名（Express 4 的 `use(['/api','/api/v1'])` 数组写法在 fallthrough 时不会回退尝试第二个前缀，已实验证实，不可用）。
+- **修复无鉴权 `/api/health` 每次执行 6 条统计查询**：监控轮询端点此前调用完整 `stats()`（含 3 个无索引 `GROUP BY` 全表扫描），better-sqlite3 同步执行期间事件循环停摆。改用单条 COUNT，响应字段不变。
+- **修复关闭游客上传后管理员被前端硬拦**：上传页 `handleFiles` 无条件检查 `guest_upload_enabled`，不看本地是否已有管理员 Token——与服务端「管理员始终放行」及提示文案「请先在管理台登录」自相矛盾，登录了也传不了。现在本地有 Token 即放行。
+- **修复 Markdown 渲染器两个缺陷**：链接 href 无协议白名单（`javascript:` 可通过，与文件头「没有 XSS 风险」的注释矛盾），现在仅放行 `http/https/mailto/锚点/相对路径`；行内代码先抽出为占位符再回填，代码内容不再被后续粗体/斜体/链接正则污染。
+- **修复 WebDAV MKCOL 重试把二次 409 当成功**：重试请求把 409 放进放行列表，父目录真的建不出来时被静默放行，问题推迟到 PUT 阶段才暴露；错误分类依赖对含 URL 的 message 做正则匹配（目录名含 "405"/"409" 会误分类）。现在保留上游真实状态码（`upstreamStatus`）按状态码分类，重试后仍 409 判定失败。
+- **修复 `Settings.get` 对损坏行无容错**：单行 JSON 损坏（手工迁移/磁盘异常）会让全站 500 且管理台无法自修复；`all()` 一直有兜底，此处补齐一致。
+- **修复前端「服务端处理中」阶段取消上传丢失删除凭证**：请求体发完后点取消，`xhr.abort()` 只会让前端丢掉响应里的 `delete_key`，服务端照常落库——留下无法删除的孤儿文件且 UI 谎报「已取消」。现在该阶段不中断请求，等响应到达后自动凭凭证清理服务端文件并如实提示。
+
+### 优化调整
+
+- `?token=` 查询串鉴权限定 GET/HEAD：与文档「仅供下载兜底」的声明一致，避免 Token 经 URL / Referer / 访问日志泄漏后被用于写操作。
+- 移除自相矛盾的 `X-Powered-By: Lumina/1.0` 指纹（前一行刚 `disable('x-powered-by')`）。
+- 管理员初始密码不再明文写入启动日志：来自 `ADMIN_PASSWORD` 时只提示「已从环境变量初始化」；来自内置默认值时仍打印（其本身随源码公开）。
+- SVG 缩略图栅格化增加 `limitInputPixels`（≈26MP）像素上限：防超大画布 SVG 按 density 放大出数亿像素的内存放大攻击，超限回落原图。
+- 限流器过期清理窗口跟随 `RATE_LIMIT_WINDOW_MS` 配置（此前硬编码 30 分钟，窗口配置超过 30 分钟时限流被静默放宽）。
+- 前端健壮性：客户端转 WebP 质量为 100 时钳制到 0.99（quality=1 是无损特例，JPEG/静态 GIF 会因「无收益」永不转换）；管理台格式筛选下拉重建后同步重置失效的筛选状态；图片列表改走统一请求封装，401 自动清理失效 Token 不再假死；跨页多选超服务端 200 上限时前端先行截断提示；Canvas 位图与画布内存释放统一移入 finally（含异常路径）。
+- 测试素材新增 `oriented.jpg`（EXIF Orientation=6），用于稳定覆盖方向修复。
+
+### 文档
+
+- `docs/API.md`：删除接口 `shared` 新语义与 `storage_removed`/`warnings` 字段、`DELETE /api/settings/:key` 敏感项脱敏、`?token=` 仅 GET/HEAD。
+- `README.md` / `.env.example`：`TRUST_PROXY` 跳数语义与部署建议同步更新。
+
 ## [1.5.0] - 2026-10-10
 
 ### 功能新增

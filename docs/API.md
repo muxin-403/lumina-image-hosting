@@ -12,7 +12,7 @@
 | 数据格式 | 请求与响应均为 JSON（上传接口为 `multipart/form-data`） |
 | 字符编码 | UTF-8 |
 | 时间字段 | 毫秒级 Unix 时间戳（`created_at`），另有 ISO 8601 形式的 `created_at_text` |
-| 鉴权方式 | `Authorization: Bearer <token>`，也支持 `?token=` 与登录 Cookie |
+| 鉴权方式 | `Authorization: Bearer <token>`，也支持 `?token=`（仅 GET/HEAD）与登录 Cookie |
 
 ### 统一响应结构
 
@@ -290,12 +290,17 @@ curl -X DELETE "http://localhost:3000/api/images/4fWYCKda9s?key=$DELETE_KEY"
     "storage_key": "2026/09/4fWYCKda9s.png",
     "shared": false,
     "hard": false,
+    "storage_removed": true,
+    "warnings": [],
     "message": "删除成功"
   }
 }
 ```
 
-> `shared=true` 表示该文件被其它记录通过秒传共享，物理文件会被保留。
+> `shared=true` 表示同一 `storage_key` 仍被其它未删记录引用（理论极端场景），
+> 此时主文件保留，但本记录专属的缩略图仍会被清理。
+> `storage_removed=false` 时表示有物理文件未能删除（`warnings` 给出原因），
+> 记录本身已删除，残留文件需人工按 `storage_key` 清理。
 >
 > 凭证由服务端用会话密钥（`SESSION_SECRET`）对「图片 ID + 内容哈希」签名生成，**不可伪造**，
 > 且只对签发时对应的那一条记录有效，无法拿去删除别的图片。两条通路都不满足时返回 `401 UNAUTHORIZED`。
@@ -424,6 +429,8 @@ curl -X PATCH http://localhost:3000/api/settings \
 ### DELETE /api/settings/:key 🔒
 
 把某项配置恢复为环境变量 / 代码默认值。
+响应带回恢复后的值；敏感项（`webdav_password`）只返回 `webdav_password_set` 布尔，
+**不会**把回落自环境变量的明文密码回显到响应中。
 
 ### GET /api/storage/health 🔒
 

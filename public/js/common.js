@@ -60,6 +60,7 @@ const Lumina = (() => {
       if (res.status === 401) store.del(TOKEN_KEY); // Token 失效：清理本地缓存
       throw err;
     }
+    if (options.full) return payload; // 需要随 data 一起返回的分页等附加字段时使用
     return payload ? payload.data : null;
   }
 

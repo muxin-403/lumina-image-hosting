@@ -18,17 +18,26 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
-/** 行内元素：先转义，再替换 Markdown 语法 */
+/** 行内元素：先转义，再替换 Markdown 语法。
+ * 行内代码先抽出为占位符，避免代码内容被后续粗体/斜体/链接替换污染；
+ * 链接 href 走协议白名单（http/https/mailto/锚点/相对路径），其余一律置为 '#'。 */
 function inline(text) {
   let out = escapeHtml(text);
-  out = out.replace(/`([^`]+)`/g, (_, code) => `<code>${code}</code>`);
+  const codeSpans = [];
+  out = out.replace(/`([^`]+)`/g, (_, code) => {
+    codeSpans.push(`<code>${code}</code>`);
+    return `\u0000C${codeSpans.length - 1}\u0000`;
+  });
   out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   out = out.replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>');
   out = out.replace(
     /\[([^\]]+)\]\(([^)\s]+)\)/g,
-    (_, label, href) =>
-      `<a href="${href.replace(/"/g, '%22')}"${/^https?:/.test(href) ? ' target="_blank" rel="noopener"' : ''}>${label}</a>`,
+    (_, label, href) => {
+      const safe = /^(https?:|mailto:|#|\/)/i.test(href) ? href : '#';
+      return `<a href="${safe}"${/^https?:/i.test(safe) ? ' target="_blank" rel="noopener"' : ''}>${label}</a>`;
+    },
   );
+  out = out.replace(/\u0000C(\d+)\u0000/g, (_, i) => codeSpans[Number(i)]);
   return out;
 }
 
@@ -113,7 +122,7 @@ function render(md) {
         buf.push(lines[i].replace(/^\s*>\s?/, ''));
         i += 1;
       }
-      out.push(`<blockquote>${render(buf.join('\n'))}</blockquote>`);
+      out.push(`<blockquote>${render(buf.join('\n')).html}</blockquote>`);
       continue;
     }
 

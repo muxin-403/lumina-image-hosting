@@ -19,8 +19,10 @@ const pagesRouter = require('./routes/pages');
 function createApp() {
   const app = express();
 
-  // 反向代理（Nginx / Caddy / Cloudflare）后需要开启，才能拿到真实 IP 与协议
-  if (config.trustProxy) app.set('trust proxy', true);
+  // 反向代理（Nginx / Caddy / Cloudflare）后需要开启，才能拿到真实 IP 与协议。
+  // trustProxy 为可信代理层数（TRUST_PROXY=true 视为 1 层），req.ip 由 Express
+  // 按跳数从右往左解析，客户端伪造 X-Forwarded-For 左段无法绕过限流。
+  if (config.trustProxy) app.set('trust proxy', config.trustProxy);
   app.disable('etag');
   app.disable('x-powered-by');
 
@@ -32,9 +34,13 @@ function createApp() {
   // 全局身份识别：解析 Token 但不拦截，后续中间件按需判断 req.isAdmin
   app.use(authenticate);
 
-  // API（同时提供 /api 与 /api/v1，方便版本化接入）
-  app.use('/api', apiLimiter(), apiRouter);
-  app.use('/api/v1', apiLimiter(), apiRouter);
+  // API（同时提供 /api 与 /api/v1，方便版本化接入）。
+  // 实现为「/api 单次挂载 + fallthrough 后接 /v1 别名」：此前两条独立挂载
+  // 会让 /api/v1 请求被 apiLimiter 双计；而 use(['/api','/api/v1']) 数组写法
+  // 在 Express 4 下 fallthrough 不会回退尝试第二个前缀，/api/v1 会直接 404。
+  const apiV1Alias = express.Router();
+  apiV1Alias.use('/v1', apiRouter); // 别名挂在 '/api' 之下，此处剥掉 '/v1' 前缀
+  app.use('/api', apiLimiter(), apiRouter, apiV1Alias);
 
   // 图片资源与页面
   app.use(pagesRouter);

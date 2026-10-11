@@ -58,6 +58,23 @@ function envList(key, fallback) {
   return raw.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 }
 
+/**
+ * 信任的反向代理层数（TRUST_PROXY）：
+ *   - 数字 1/2/3…：信任最近 n 层代理，req.ip 取「从右往左第一个不可信地址」，
+ *     客户端伪造 X-Forwarded-For 左段无法绕过限流；
+ *   - true（兼容旧写法）：视为 1 层（最常见的单层 Nginx / Cloudflare 场景）；
+ *   - false / 未设置：不信任任何代理头，req.ip = 直连地址。
+ */
+function envProxyHops(key, fallback = false) {
+  const raw = process.env[key];
+  if (raw === undefined || raw === '') return fallback;
+  const s = String(raw).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on', 'y'].includes(s)) return 1;
+  if (['0', 'false', 'no', 'off', 'n'].includes(s)) return false;
+  const n = parseInt(s, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 function stripEndSlash(u) {
   return String(u || '').replace(/\/+$/, '');
 }
@@ -105,7 +122,7 @@ const config = {
   // --- 服务 ---
   host: env('HOST', '0.0.0.0'),
   port: envInt('PORT', 3000),
-  trustProxy: envBool('TRUST_PROXY', false),
+  trustProxy: envProxyHops('TRUST_PROXY', false),
   siteName: env('SITE_NAME', 'Lumina 图床'),
   /** 对外可访问的基础地址，留空则按请求头自动推断（反代场景建议显式配置） */
   publicBaseUrl: stripEndSlash(env('PUBLIC_BASE_URL', '')),

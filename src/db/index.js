@@ -239,12 +239,29 @@ const Images = {
   idsBySha(sha) {
     return db.prepare('SELECT id FROM images WHERE sha256 = ? AND deleted = 0').all(sha).map((r) => r.id);
   },
+
+  /** 判断物理文件（storage_key）是否仍被其它未删记录引用。
+   * 真正决定「能否删物理文件」的是 key 引用计数 —— 秒传复用的是记录而非文件，
+   * 同 sha256 的多条记录各自持有独立的物理文件。 */
+  storageKeyInUse(storageKey, excludeId) {
+    const r = db
+      .prepare('SELECT COUNT(*) AS c FROM images WHERE storage_key = ? AND deleted = 0 AND id != ?')
+      .get(storageKey, excludeId);
+    return r.c > 0;
+  },
 };
 
 const Settings = {
   get(key) {
     const row = stmts.getSetting.get(key);
-    return row ? JSON.parse(row.value) : undefined;
+    if (!row) return undefined;
+    // 容错：settings 表某行损坏（手工迁移 / 磁盘异常）不应拖垮全站。
+    // all() 一直有同样的兜底，这里补齐保持一致
+    try {
+      return JSON.parse(row.value);
+    } catch (_) {
+      return undefined;
+    }
   },
   all() {
     const out = {};

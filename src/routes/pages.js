@@ -16,7 +16,7 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const { Readable } = require('stream');
+const { Readable, pipeline } = require('stream');
 const config = require('../config');
 const { Images } = require('../db');
 const { storageManager } = require('../services/settings');
@@ -32,7 +32,30 @@ const router = express.Router();
 const ID_RE = /^[A-Za-z0-9_-]{4,64}$/;
 const IMMUTABLE = 'public, max-age=31536000, immutable';
 
-function sendLocal(res, absPath, mime, opts = {}) {
+/**
+ * 把可读流安全地接到响应上。
+ * ------------------------------------------------------------------
+ * 必须用 pipeline（而非裸 pipe）：
+ *   - 源流 / 目标流任一端报错都有回调兜底，绝不让 'error' 事件无人监听
+ *     （否则 uncaughtException 会杀死整个进程 —— 远程可触发的全站宕机）；
+ *   - 客户端提前断开时自动销毁源流（本地文件句柄 / WebDAV 上游连接都会被中止）。
+ * @returns {Promise<boolean>} 是否发生了错误（true=需要调用方兜底）
+ */
+function pipeToRes(readable, res, { label = '' } = {}) {
+  return new Promise((resolve) => {
+    pipeline(readable, res, (err) => {
+      if (err) {
+        // 客户端提前断开属于正常取消，降为静默；其余错误记录日志
+        const benign = err.code === 'ERR_STREAM_PREMATURE_CLOSE' || /aborted|premature/i.test(err.message || '');
+        if (!benign) logger.warn(`响应流中断${label ? `：${label}` : ''}`, err.message);
+        return resolve(true);
+      }
+      return resolve(false);
+    });
+  });
+}
+
+async function sendLocal(res, absPath, mime, opts = {}) {
   if (!fs.existsSync(absPath)) return false;
   res.setHeader('Cache-Control', opts.cache || IMMUTABLE);
   if (opts.download) {
@@ -47,7 +70,13 @@ function sendLocal(res, absPath, mime, opts = {}) {
     res.setHeader('X-Content-Type-Options', 'nosniff');
   }
   res.type(mime);
-  fs.createReadStream(absPath).pipe(res);
+  const failed = await pipeToRes(fs.createReadStream(absPath), res, { label: absPath });
+  if (failed) {
+    // 读流失败（文件在 existsSync 之后被删除 / 权限变化 / EISDIR 等）：
+    // 响应未开始则给出明确错误；已开始则只能掐断连接
+    if (!res.headersSent) throw new ApiError(500, '资源读取失败', 'READ_FAILED');
+    res.destroy();
+  }
   return true;
 }
 
@@ -63,8 +92,17 @@ async function proxyRemote(res, key, { mime, download, cache } = {}) {
 
   const upstream = await storage.remoteFetch(key);
   if (!upstream) return false;
-  if (upstream.status === 404) return false;
+  if (upstream.status === 404) {
+    // 显式消费/取消响应体：未读的 body 会占住 undici 连接直到 GC，逐渐耗尽连接池
+    if (upstream.body && typeof upstream.body.cancel === 'function') {
+      await upstream.body.cancel().catch(() => {});
+    }
+    return false;
+  }
   if (!upstream.ok || !upstream.body) {
+    if (upstream.body && typeof upstream.body.cancel === 'function') {
+      await upstream.body.cancel().catch(() => {});
+    }
     throw new ApiError(502, `上游存储返回 ${upstream.status}`, 'UPSTREAM_ERROR');
   }
 
@@ -83,11 +121,10 @@ async function proxyRemote(res, key, { mime, download, cache } = {}) {
   const len = upstream.headers.get('content-length');
   if (len) res.setHeader('Content-Length', len);
 
-  try {
-    Readable.fromWeb(upstream.body).pipe(res);
-  } catch (err) {
-    logger.warn('WebDAV 代理转发失败', { key, err: err.message });
+  const failed = await pipeToRes(Readable.fromWeb(upstream.body), res, { label: `webdav ${key}` });
+  if (failed) {
     if (!res.headersSent) throw new ApiError(502, '代理转发失败', 'PROXY_ERROR');
+    res.destroy();
   }
   return true;
 }
@@ -100,21 +137,23 @@ async function proxyRemote(res, key, { mime, download, cache } = {}) {
  *   - 未设置：回落 public/favicon.svg 默认图标
  * 自定义图标用较短缓存（5 分钟），前台通过 /favicon.ico?v=<ts> 破缓存。
  */
-router.get(['/favicon.ico', '/favicon.png', '/favicon.svg', '/favicon'], (req, res, next) => {
-  const cur = faviconService.current();
-  if (cur && sendLocal(res, cur.abs, cur.mime, { cache: 'public, max-age=300' })) {
-    return undefined;
-  }
-  if (
-    sendLocal(res, faviconService.DEFAULT_FAVICON, 'image/svg+xml', {
-      cache: config.isProd ? 'public, max-age=3600' : 'no-store',
-    })
-  ) {
-    return undefined;
-  }
-  return next(); // 默认图标文件缺失时交回 404 流程
-});
-
+router.get(
+  ['/favicon.ico', '/favicon.png', '/favicon.svg', '/favicon'],
+  asyncHandler(async (req, res, next) => {
+    const cur = faviconService.current();
+    if (cur && (await sendLocal(res, cur.abs, cur.mime, { cache: 'public, max-age=300' }))) {
+      return undefined;
+    }
+    if (
+      await sendLocal(res, faviconService.DEFAULT_FAVICON, 'image/svg+xml', {
+        cache: config.isProd ? 'public, max-age=3600' : 'no-store',
+      })
+    ) {
+      return undefined;
+    }
+    return next(); // 默认图标文件缺失时交回 404 流程
+  }),
+);
 /* ---------------------------- 图片直链 ---------------------------- */
 
 router.get(
@@ -127,7 +166,7 @@ router.get(
     const abs = path.join(config.storageDir, key);
 
     // 1) 本地命中（local / hybrid 模式）直接吐流
-    if (sendLocal(res, abs, mime)) return undefined;
+    if (await sendLocal(res, abs, mime)) return undefined;
 
     // 2) 本地不存在：由后端通过 WebDAV 协议拉取并代理转发，
     //    绝不重定向到 WebDAV 真实地址（避免暴露且私有网盘直链本就不可访问）
@@ -144,7 +183,7 @@ router.get(
 
 router.get(
   '/t/:id',
-  asyncHandler(async (req, res) => {
+  asyncHandler(async (req, res, next) => {
     const { id } = req.params;
     if (!ID_RE.test(id)) throw new ApiError(400, '非法的图片 ID', 'BAD_ID');
 
@@ -153,13 +192,13 @@ router.get(
 
     if (row.thumb_key) {
       const abs = path.join(config.thumbDir, row.thumb_key);
-      if (sendLocal(res, abs, 'image/webp')) return undefined;
+      if (await sendLocal(res, abs, 'image/webp')) return undefined;
     }
     // 缩略图缺失：回落到原图（本地命中直接吐流，否则代理转发远端原图）
     const key = row.storage_key;
     const localAbs = path.join(config.storageDir, key);
     const mime = EXT_MIME[row.ext] || 'application/octet-stream';
-    if (sendLocal(res, localAbs, mime, { cache: 'public, max-age=3600' })) return undefined;
+    if (await sendLocal(res, localAbs, mime, { cache: 'public, max-age=3600' })) return undefined;
     if (await proxyRemote(res, key, { mime, cache: 'public, max-age=3600' })) return undefined;
     return next();
   }),
@@ -179,7 +218,7 @@ router.get(
     const mime = EXT_MIME[row.ext] || 'application/octet-stream';
     const filename = row.original_name || `${row.id}.${row.ext}`;
     const localAbs = path.join(config.storageDir, row.storage_key);
-    if (sendLocal(res, localAbs, mime, { cache: 'no-store', download: filename })) {
+    if (await sendLocal(res, localAbs, mime, { cache: 'no-store', download: filename })) {
       return undefined;
     }
 

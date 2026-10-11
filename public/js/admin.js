@@ -171,12 +171,18 @@
 
       // 动态填充格式筛选下拉框
       const extSelect = $('filter-ext');
-      const current = extSelect.value;
+      let current = extSelect.value;
       extSelect.innerHTML =
         '<option value="">全部</option>' +
         (s.byExt || [])
           .map((f) => `<option value="${escapeHtml(f.ext)}">${escapeHtml(f.ext.toUpperCase())} (${f.count})</option>`)
           .join('');
+      // 旧筛选值对应的格式已不存在时，下拉框会显示「全部」但 state.ext 仍是旧值，
+      // 后续刷新/翻页会继续按不可见的旧格式过滤 —— 必须把状态一并重置
+      if (current && !Array.from(extSelect.options).some((o) => o.value === current)) {
+        current = '';
+        state.ext = '';
+      }
       extSelect.value = current;
     } catch (err) {
       toast(`统计加载失败：${err.message}`, 'error');
@@ -199,14 +205,11 @@
       if (state.uploader) params.set('uploader', state.uploader);
       if (state.ext) params.set('ext', state.ext);
 
-      const res = await fetch(`/api/images?${params}`, {
-        headers: { Authorization: `Bearer ${store.get(TOKEN_KEY)}` },
-      });
-      const payload = await res.json();
-      if (!res.ok) throw new Error((payload.error && payload.error.message) || `HTTP ${res.status}`);
-
-      state.items = payload.data || [];
-      state.pagination = payload.pagination;
+      // 走统一请求封装（full 模式取回分页字段）：401 时自动清理失效 Token，
+      // 此前绕过封装导致 Token 过期后列表假死（不清理、不回登录态）
+      const payload = await request(`/api/images?${params}`, { full: true });
+      state.items = (payload && payload.data) || [];
+      state.pagination = (payload && payload.pagination) || null;
       renderTable();
     } catch (err) {
       tbody.innerHTML = `<tr><td colspan="8"><div class="empty"><p>加载失败：${escapeHtml(err.message)}</p></div></td></tr>`;
@@ -332,15 +335,21 @@
     });
 
     $('delete-selected').addEventListener('click', async () => {
-      const ids = [...state.selected];
+      let ids = [...state.selected];
       if (!ids.length) return;
+      // 服务端单次批量删除上限 200：超限会整单 400，前端先行截断并提示
+      if (ids.length > 200) {
+        toast(`单次最多删除 200 张，本次仅删除前 200 张（已选 ${ids.length} 张）`, 'info', 4000);
+        ids = ids.slice(0, 200);
+      }
       if (!confirm(`确定删除选中的 ${ids.length} 张图片吗？\n\n文件将被永久移除，不可恢复。`)) return;
 
       try {
         const res = await request('/api/images/batch-delete', { method: 'POST', body: { ids } });
         toast(`已删除 ${res.deleted.length} 张${res.failed.length ? `，失败 ${res.failed.length} 张` : ''}`,
           res.failed.length ? 'info' : 'success');
-        state.selected.clear();
+        ids.forEach((id) => state.selected.delete(id));
+        syncSelectionUI();
         loadImages();
         loadStats();
       } catch (err) {

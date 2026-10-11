@@ -56,7 +56,13 @@ async function bootstrap() {
     logger.info(`允许格式      ${(settings.get('allowed_formats') || []).join(', ')}`);
     logger.info(`管理后台      ${shown}/admin`);
     if (admin.created) {
-      logger.warn(`管理员初始密码：${admin.password}（来源：${admin.from}）`);
+      if (admin.from === '内置默认值') {
+        // 内置默认密码本就随源码公开，打印出来是为了让部署者知道当前可用
+        logger.warn(`管理员初始密码：${admin.password}（来源：${admin.from}）`);
+      } else {
+        // 来自 ADMIN_PASSWORD 的真实密码不写入日志（docker logs / 日志采集可见）
+        logger.warn(`管理员密码已从 ${admin.from} 初始化（明文不写入日志）`);
+      }
       logger.warn('请登录后台后立即修改密码！');
     }
     console.log('');

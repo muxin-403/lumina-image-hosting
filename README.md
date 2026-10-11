@@ -345,7 +345,9 @@ WebDAV 密码把线上密码清空）。
 ### 4.9 其他值得一提的工程细节
 
 - **秒传**：按 `sha256` 去重，命中则直接复用已有记录并标记 `duplicated: true`；
-  删除时若发现同哈希仍有其它记录，则**不删物理文件**，避免误伤。
+  删除时按 `storage_key` 引用计数判断物理文件是否仍被其它记录引用，
+  仍被引用则保留文件；本记录专属的缩略图无论是否共享都会清理。
+  删除响应带 `storage_removed` / `warnings`，物理清理失败不再静默。
 - **路径穿越防护**：本地驱动的 key 必须匹配 `^\d{4}/\d{2}/[A-Za-z0-9_-]+\.[a-z0-9]+$`，
   越界直接 400。静态资源用 `fs.createReadStream` + 严格正则，而非把目录交给静态中间件。
 - **原子写入**：先写 `*.tmp` 再 `rename`，进程被杀不会留下半截文件。
@@ -448,7 +450,7 @@ docker compose logs -f lumina
 | --- | --- | --- |
 | `PORT` | 3000 | 监听端口 |
 | `PUBLIC_BASE_URL` | 空 | 对外基础地址；反代/域名场景**必须配置**，否则直链会带容器内部 host |
-| `TRUST_PROXY` | false | 置于 Nginx / Cloudflare 之后时设为 true，才能拿到真实 IP 与协议 |
+| `TRUST_PROXY` | false | 可信代理层数：1/2/3…；`true` 兼容旧写法视为 1 层。按跳数解析后客户端伪造 X-Forwarded-For 左段无法绕过限流 |
 | `ADMIN_PASSWORD` | `admin123` | 仅首次启动生效 |
 | `MAX_FILE_SIZE` | `20mb` | 管理员单文件上限，支持 `20mb`/`512kb` 写法 |
 | `GUEST_MAX_FILE_SIZE` | `5mb` | 游客单文件上限（管理台可热改） |
@@ -651,8 +653,10 @@ curl -X PATCH http://localhost:3000/api/settings -H "Authorization: Bearer $TOKE
 ## 八、部署建议与生产注意事项
 
 1. **必须设置 `PUBLIC_BASE_URL`**。否则反代后面生成的直链会带 `http://` 与容器内部端口。
-2. **必须开启 `TRUST_PROXY=true`**（在 Nginx/Caddy/Cloudflare 之后），
-   否则限流会按反代 IP 统计、`X-Forwarded-Proto` 拿不到，直链协议可能错成 http。
+2. **必须配置 `TRUST_PROXY` 为可信代理层数**（单层 Nginx/Caddy/Cloudflare 填 `1`，
+   `true` 兼容旧写法视为 1 层），否则限流会按反代 IP 统计、`X-Forwarded-Proto` 拿不到，
+   直链协议可能错成 http。按跳数解析后，客户端伪造 `X-Forwarded-For` 左段无法绕过限流；
+   多于一层代理（如 CDN + Nginx）请填实际层数。
 3. **改掉默认管理员密码**，并显式配置 `SESSION_SECRET`（多实例部署必须一致）。
 4. **备份两个目录**：`data/`（数据库 + 会话密钥）与 `storage/`（图片）。
    SQLite 已开 WAL 模式，热备份请用 `sqlite3 data/lumina.db ".backup out.db"`。

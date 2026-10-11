@@ -12,7 +12,7 @@
 const fsp = require('fs/promises');
 const path = require('path');
 const config = require('../config');
-const { Images, Settings } = require('../db');
+const { Images } = require('../db');
 const { settings, storageManager } = require('./settings');
 const { processImage } = require('./image');
 const { shortId, dateShard, safeBaseName, ApiError, logger } = require('../utils');
@@ -134,7 +134,9 @@ async function storeFile({ file, isAdmin, clientIp = '', ua = '', req }) {
   timings.processMs = Date.now() - processStart;
 
   // ---- 秒传：同内容不重复存储（可用 DEDUPE=0 关闭） ----
-  const dedupe = Settings.get('dedupe');
+  // 必须走运行时配置门面（DB > .env > 默认值）：直读 DB 层会让仅通过
+  // .env 配置 DEDUPE=0 的部署静默失效（DB 无记录时 undefined !== false 恒真）
+  const dedupe = settings.get('dedupe');
   if (dedupe !== false) {
     const dedupeStart = Date.now();
     const exist = Images.findBySha(result.sha256);
@@ -147,54 +149,75 @@ async function storeFile({ file, isAdmin, clientIp = '', ua = '', req }) {
     }
   }
 
-  const id = shortId(10);
   const now = new Date();
-  const key = buildKey(id, result.ext, now);
-  const thumbKey = buildThumbKey(id, now);
 
-  // 1) 写主存储（hybrid 模式下会同时写本地 + WebDAV）
-  const storeStart = Date.now();
-  const putResult = await storage.put(key, result.buffer, result.mime);
-  timings.storeMs = Date.now() - storeStart;
+  // 写主存储 → 缩略图 → 落库。
+  // 短 ID 主键碰撞（概率 ~54^-10）一旦发生会让已写入磁盘的文件成为无 DB 引用的孤儿：
+  // 落库失败时回收本次已写文件并换新 ID 重试一次。
+  const persistOnce = async () => {
+    const attemptId = shortId(10);
+    const attemptKey = buildKey(attemptId, result.ext, now);
+    const attemptThumbKey = buildThumbKey(attemptId, now);
 
-  // 2) 写缩略图（恒本地，失败不阻断）
-  let savedThumb = null;
-  if (result.thumbBuffer) {
-    try {
-      const abs = path.join(config.thumbDir, thumbKey);
-      await fsp.mkdir(path.dirname(abs), { recursive: true });
-      await fsp.writeFile(abs, result.thumbBuffer);
-      savedThumb = thumbKey;
-    } catch (err) {
-      logger.warn('缩略图落盘失败', err.message);
+    const storeStart = Date.now();
+    const putResult = await storage.put(attemptKey, result.buffer, result.mime);
+    timings.storeMs = (timings.storeMs || 0) + (Date.now() - storeStart);
+
+    let savedThumb = null;
+    if (result.thumbBuffer) {
+      try {
+        const abs = path.join(config.thumbDir, attemptThumbKey);
+        await fsp.mkdir(path.dirname(abs), { recursive: true });
+        await fsp.writeFile(abs, result.thumbBuffer);
+        savedThumb = attemptThumbKey;
+      } catch (err) {
+        logger.warn('缩略图落盘失败', err.message);
+      }
     }
+
+    const createStart = Date.now();
+    try {
+      const row = Images.create({
+        id: attemptId,
+        storage_key: attemptKey,
+        original_name: safeBaseName(file.originalname) || `${attemptId}.${result.ext}`,
+        ext: result.ext,
+        mime: result.mime,
+        size: result.buffer.length,
+        width: result.width || 0,
+        height: result.height || 0,
+        pages: result.pages || 1,
+        animated: result.animated ? 1 : 0,
+        vector: result.vector ? 1 : 0,
+        sha256: result.sha256,
+        storage_driver: storage.name,
+        thumb_key: savedThumb,
+        uploader: isAdmin ? 'admin' : 'guest',
+        uploader_ip: clientIp,
+        uploader_ua: String(ua).slice(0, 200),
+        created_at: Date.now(),
+      });
+      timings.dbMs = (timings.dbMs || 0) + (Date.now() - createStart);
+      return { row, putResult };
+    } catch (err) {
+      timings.dbMs = (timings.dbMs || 0) + (Date.now() - createStart);
+      await storageManager.get().remove(attemptKey).catch(() => {});
+      if (savedThumb) await fsp.unlink(path.join(config.thumbDir, savedThumb)).catch(() => {});
+      throw err;
+    }
+  };
+
+  let persist;
+  try {
+    persist = await persistOnce();
+  } catch (err) {
+    if (!/UNIQUE constraint/i.test(String(err.message))) throw err;
+    logger.warn('短 ID 主键碰撞，已回收本次文件并换新 ID 重试', err.message);
+    persist = await persistOnce();
   }
+  const { row, putResult } = persist;
 
-  // 3) 落库
-  const dbStart = Date.now();
-  const row = Images.create({
-    id,
-    storage_key: key,
-    original_name: safeBaseName(file.originalname) || `${id}.${result.ext}`,
-    ext: result.ext,
-    mime: result.mime,
-    size: result.buffer.length,
-    width: result.width || 0,
-    height: result.height || 0,
-    pages: result.pages || 1,
-    animated: result.animated ? 1 : 0,
-    vector: result.vector ? 1 : 0,
-    sha256: result.sha256,
-    storage_driver: storage.name,
-    thumb_key: savedThumb,
-    uploader: isAdmin ? 'admin' : 'guest',
-    uploader_ip: clientIp,
-    uploader_ua: String(ua).slice(0, 200),
-    created_at: Date.now(),
-  });
-  timings.dbMs = Date.now() - dbStart;
-
-  logger.ok(`已上传 ${id}.${result.ext}`, {
+  logger.ok(`已上传 ${row.id}.${result.ext}`, {
     size: humanize(result.buffer.length),
     from: humanize(result.rawSize),
     driver: storage.name,
@@ -213,29 +236,45 @@ async function storeFile({ file, isAdmin, clientIp = '', ua = '', req }) {
 }
 
 /**
- * 删除图片（含物理文件 + 缩略图 + 数据库记录）
- * 若存在同哈希的其它记录，说明文件是被秒传共享的，此时不删除物理文件。
+ * 删除图片（含物理文件 + 缩略图 + 数据库记录）。
+ * ------------------------------------------------------------------
+ * 物理文件是否可删由 storage_key 引用计数决定 —— 秒传复用的是记录而非文件，
+ * 同 sha256 的记录各自持有独立物理文件，按 sha256 判断会把不该保的文件留下。
+ * 缩略图恒为本记录专属（路径含记录 id），无论主文件是否共享都必须清理。
+ * 物理清理失败不抛错（避免删除接口被存储异常卡死），但通过
+ * storage_removed / warnings 如实回传，不再静默吞掉。
  */
 async function deleteImage(id, { hard = false } = {}) {
   const row = Images.getAny(id);
   if (!row || row.deleted) throw new ApiError(404, `图片不存在：${id}`, 'IMAGE_NOT_FOUND');
 
-  const sameContent = row.sha256
-    ? Images.idsBySha(row.sha256).filter((x) => x !== id)
-    : [];
-  const shared = sameContent.length > 0;
+  const shared = Images.storageKeyInUse(row.storage_key, id);
+  const warnings = [];
+  let storageRemoved = true;
 
-  if (!shared) {
-    await storageManager.get().remove(row.storage_key);
-    if (row.thumb_key) {
-      await fsp.unlink(path.join(config.thumbDir, row.thumb_key)).catch(() => {});
+  const removed = await storageManager.get().remove(row.storage_key);
+  for (const r of removed) {
+    if (!r.ok) {
+      storageRemoved = false;
+      warnings.push(`存储(${r.driver})删除失败：${r.error || '未知原因'}`);
+    }
+  }
+
+  if (row.thumb_key) {
+    try {
+      await fsp.unlink(path.join(config.thumbDir, row.thumb_key));
+    } catch (err) {
+      if (err.code !== 'ENOENT') {
+        storageRemoved = false;
+        warnings.push(`缩略图删除失败：${err.message}`);
+      }
     }
   }
 
   if (hard) Images.hardDelete(id);
   else Images.softDelete(id);
 
-  return { id, storage_key: row.storage_key, shared, hard };
+  return { id, storage_key: row.storage_key, shared, hard, storage_removed: storageRemoved, warnings };
 }
 
 module.exports = { storeFile, deleteImage, toDTO, baseUrlOf, buildKey, buildThumbKey };

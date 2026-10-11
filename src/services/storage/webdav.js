@@ -93,7 +93,8 @@ class WebDAVStorage {
         const err = new Error(
           `WebDAV ${method} 失败：HTTP ${res.status} ${res.statusText} ${text.slice(0, 200)}`,
         );
-        err.status = 502;
+        err.status = 502; // 对外统一按「上游存储故障」报 502
+        err.upstreamStatus = res.status; // 保留上游真实状态码，供内部分类（如 MKCOL 405/409）
         throw err;
       }
       return res;
@@ -112,7 +113,11 @@ class WebDAVStorage {
   /**
    * 递归创建目录（MKCOL）。
    * - 目录已存在时服务端返回 405，属正常情况，需显式放行，否则会误判失败；
-   * - 父目录未就绪时返回 409，需要重试一次；
+   * - 父目录未就绪时返回 409，重试一次；重试后仍 409 说明目录确实建不出来，
+   *   必须判定失败 —— 此前把 409 放进重试的 okStatus，二次 409 被当成功，
+   *   问题被推迟到 PUT 阶段才以更晦涩的报错暴露。
+   * - 状态分类依据 upstreamStatus（真实状态码），不再对含 URL 的 message 做正则匹配
+   *   （目录名含 "405"/"409" 时会把无关错误误分类）。
    * - 传空字符串表示「确保配置的根目录存在」——很多 WebDAV 服务
    *   （自建 Alist / 群晖 / 通用 WebDAV）不会自动创建目录，必须先 MKCOL。
    */
@@ -125,12 +130,12 @@ class WebDAVStorage {
       acc = acc ? `${acc}/${seg}` : seg;
       const target = `${this.davUrl}/${acc.split('/').map(encodeURIComponent).join('/')}/`;
       try {
-        await this.request('MKCOL', target, { okStatus: [405, 301, 302] });
+        await this.request('MKCOL', target, { okStatus: [405] });
       } catch (err) {
-        // 409 表示父目录尚未就绪（有些服务端有延迟），重试一次
-        if (/409/.test(err.message)) {
-          await this.request('MKCOL', target, { okStatus: [405, 301, 302, 409] });
-        } else if (!/405/.test(err.message)) {
+        if (err.upstreamStatus === 409) {
+          // 409 表示父目录尚未就绪（有些服务端有延迟），重试一次；仍 409 则抛出
+          await this.request('MKCOL', target, { okStatus: [405] });
+        } else if (err.upstreamStatus !== 405) {
           throw err;
         }
       }

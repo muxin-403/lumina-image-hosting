@@ -145,6 +145,15 @@ router.delete(
     const { key } = req.params;
     if (!(key in DEFAULTS)) throw new ApiError(400, `不支持的配置项：${key}`, 'UNKNOWN_SETTING');
     settings.reset(key);
+    // 敏感项 reset 后回落到 .env 的明文值，绝不能在响应中回显
+    // （GET /api/settings 对这类项只返回 *_set 布尔，这里保持同一脱敏口径）
+    if (key === 'webdav_password') {
+      return ok(res, {
+        key,
+        webdav_password_set: !!settings.get(key),
+        message: '已恢复为环境变量 / 默认值',
+      });
+    }
     return ok(res, { key, value: settings.get(key), message: '已恢复为环境变量 / 默认值' });
   }),
 );

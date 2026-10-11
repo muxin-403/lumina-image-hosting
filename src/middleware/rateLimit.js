@@ -13,15 +13,22 @@ const { getClientIp } = require('./auth');
 
 const buckets = new Map(); // key -> number[] 命中时间戳列表
 
-// 定期清理过期桶，防止长期运行内存膨胀
-const sweeper = setInterval(() => {
-  const now = Date.now();
+/**
+ * 清理窗口外的过期条目，防止长期运行内存膨胀。
+ * 窗口长度必须与限流实际使用的 windowMs 一致 —— 此前硬编码 30 分钟，
+ * 当配置的窗口超过 30 分钟时会被提前清空，限流静默变松。
+ * 导出供测试与外部定时调用。
+ */
+function sweep(now, windowMs = config.rateLimit.windowMs) {
   for (const [key, list] of buckets) {
-    const alive = list.filter((t) => now - t < 30 * 60_000);
+    const alive = list.filter((t) => now - t < windowMs);
     if (alive.length === 0) buckets.delete(key);
     else buckets.set(key, alive);
   }
-}, 5 * 60_000);
+  return buckets.size;
+}
+
+const sweeper = setInterval(() => sweep(Date.now()), 5 * 60_000);
 if (sweeper.unref) sweeper.unref();
 
 /**
@@ -60,4 +67,4 @@ const uploadLimiter = () => rateLimit('upload', config.rateLimit.uploadMax);
 const loginLimiter = () => rateLimit('login', config.rateLimit.loginMax);
 const apiLimiter = () => rateLimit('api', config.rateLimit.apiMax);
 
-module.exports = { rateLimit, uploadLimiter, loginLimiter, apiLimiter, buckets };
+module.exports = { rateLimit, uploadLimiter, loginLimiter, apiLimiter, buckets, sweep };

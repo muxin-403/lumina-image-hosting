@@ -57,6 +57,12 @@ async function main() {
     ['big.jpg', await sharp({
       create: { width: 6000, height: 4000, channels: 3, background: { r: 18, g: 24, b: 40 } },
     }).jpeg({ quality: 96 }).toBuffer()],
+    // 带 EXIF Orientation=6 的 JPEG：像素 400×300（横），显示方向 300×400（竖）。
+    // 用于验证「EXIF 旋转 + 服务端重编码后宽高转置入库」的修复（纯色保证 q82 重编码必然更小，
+    // 不触发负优化保护回退，使断言稳定）。
+    ['oriented.jpg', await sharp({
+      create: { width: 400, height: 300, channels: 3, background: { r: 21, g: 101, b: 192 } },
+    }).jpeg({ quality: 100 }).withMetadata({ orientation: 6 }).toBuffer()],
   ];
 
   for (const [name, buf] of tasks) {

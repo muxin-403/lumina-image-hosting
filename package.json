@@ -9,10 +9,11 @@
     "dev": "node --watch src/server.js",
     "assets": "node examples/make-test-assets.js",
     "pretest": "node examples/make-test-assets.js",
-    "test": "node examples/smoke-test.js && node examples/webdav-test.js && node examples/ui-check.js",
+    "test": "node examples/smoke-test.js && node examples/webdav-test.js && node examples/ui-check.js && node examples/bugfix-test.js",
     "test:api": "node examples/smoke-test.js",
     "test:webdav": "node examples/webdav-test.js",
-    "test:ui": "node examples/ui-check.js"
+    "test:ui": "node examples/ui-check.js",
+    "test:bugfix": "node examples/bugfix-test.js"
   },
   "engines": {
     "node": ">=18.17.0"

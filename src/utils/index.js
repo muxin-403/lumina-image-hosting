@@ -12,12 +12,19 @@ const path = require('path');
 // 去掉容易混淆的 0/O/1/l/I
 const ID_ALPHABET = '23456789abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ';
 
-/** 生成 URL 安全的短 ID（默认 10 位，约 57^10 空间，足够抗碰撞） */
+/** 生成 URL 安全的短 ID（默认 10 位，约 54^10 ≈ 2×10^17 空间，足够抗碰撞）。
+ * 用拒绝采样剔除取模偏差：字节值 ≥ floor(256/n)*n 的部分弃用，
+ * 保证 alphabet 内每个字符等概率出现。 */
 function shortId(len = 10) {
-  const bytes = crypto.randomBytes(len);
-  let out = '';
-  for (let i = 0; i < len; i += 1) out += ID_ALPHABET[bytes[i] % ID_ALPHABET.length];
-  return out;
+  const max = Math.floor(256 / ID_ALPHABET.length) * ID_ALPHABET.length;
+  const out = [];
+  while (out.length < len) {
+    const bytes = crypto.randomBytes(len * 2);
+    for (let i = 0; i < bytes.length && out.length < len; i += 1) {
+      if (bytes[i] < max) out.push(ID_ALPHABET[bytes[i] % ID_ALPHABET.length]);
+    }
+  }
+  return out.join('');
 }
 
 /** 去掉路径成分，仅保留文件名，并做白名单化 */

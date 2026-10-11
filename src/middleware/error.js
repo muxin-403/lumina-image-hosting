@@ -26,7 +26,13 @@ function notFound(req, res, next) {
 function errorHandler(err, req, res, _next) {
   const status = Number.isInteger(err.status) ? err.status : 500;
   const code = err.code && typeof err.code === 'string' ? err.code : `E${status}`;
-  const message = status >= 500 ? err.message || '服务器内部错误' : err.message || '请求失败';
+  // ApiError 的 message 是面向客户端的业务文案，可透传；
+  // 其余异常（fs/sqlite/依赖库内部错误）的 message 常含绝对路径等内部信息，5xx 一律用通用文案
+  const message = err instanceof ApiError
+    ? err.message || '请求失败'
+    : status >= 500
+      ? '服务器内部错误'
+      : err.message || '请求失败';
 
   // 5xx 记录完整堆栈，4xx 只在 debug 下打印一行
   if (status >= 500) {
@@ -78,8 +84,7 @@ function securityHeaders(_req, res, next) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   res.setHeader('Referrer-Policy', 'no-referrer-when-downgrade');
-  res.removeHeader('X-Powered-By');
-  res.setHeader('X-Powered-By', 'Lumina/1.0');
+  res.removeHeader('X-Powered-By'); // 保持去指纹（不再写回 Lumina/1.0 版本标识）
   next();
 }
 

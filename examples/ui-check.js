@@ -758,6 +758,83 @@ async function main() {
 
   RW.close();
 
+  /* ------ 9. 权限边界与统一请求封装（对抗式审查修复回归） ------ */
+  section('9. 游客上传关闭时管理员仍可上传 + 401 统一处理');
+
+  // 9.1 #14：服务端对管理员始终放行，前端不得把已登录的管理员也拦下
+  const sec9Login = await fetch(`${BASE}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: PASSWORD }),
+  });
+  const sec9LoginJson = await sec9Login.json();
+  const sec9Token = sec9LoginJson && sec9LoginJson.data && sec9LoginJson.data.token;
+  assert(!!sec9Token, '（前置）管理员登录获取 Token');
+
+  await fetch(`${BASE}/api/settings`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sec9Token}` },
+    body: JSON.stringify({ guest_upload_enabled: false }),
+  });
+
+  const gatePage = await loadPage('/');
+  const GW9 = gatePage.window;
+  const GD9 = gatePage.document;
+  assert(gatePage.errors.length === 0, '关闭游客上传后页面加载无运行时异常');
+  assert(/仅管理员可上传/.test(GD9.querySelector('#limit-hint').textContent),
+    '关闭游客上传后提示语正确切换', GD9.querySelector('#limit-hint').textContent);
+
+  // 模拟管理员已在管理台登录（Token 已在本地存储）
+  GW9.localStorage.setItem('lumina_token', sec9Token);
+  const gatePng = new GW9.File([new Uint8Array(fs.readFileSync(assetPath('sample.png')))],
+    'admin-gate.png', { type: 'image/png' });
+  const gateResult = await pickAndUpload(GW9, GD9, gatePng);
+  assert(gateResult.card !== null,
+    '#14 关闭游客上传后管理员仍可上传（前端不再硬拦已登录管理员）',
+    gateResult.card ? gateResult.url : '上传被前端拦截，卡片未出现');
+  GW9.close();
+
+  // 9.2 H13：列表请求 401 时统一封装清理失效 Token（不再列表假死）
+  const a401Page = await loadPage('/admin');
+  const AW9 = a401Page.window;
+  const AD9 = a401Page.document;
+  AD9.querySelector('#password').value = PASSWORD;
+  AD9.querySelector('#login-form').dispatchEvent(new AW9.Event('submit', { bubbles: true, cancelable: true }));
+  for (let i = 0; i < 40; i += 1) {
+    if (AD9.querySelector('#dash-view').hidden === false) break;
+    await sleep(250);
+  }
+  assert(AD9.querySelector('#dash-view').hidden === false, '（前置）管理台登录成功');
+
+  // 把 /api/images 劫持为 401（Token 过期场景），点击刷新触发 loadImages
+  const realFetch9 = AW9.fetch;
+  AW9.fetch = (input, init) => {
+    if (String(input).includes('/api/images')) {
+      return Promise.resolve(new Response(
+        JSON.stringify({ success: false, error: { code: 'UNAUTHORIZED', message: '需要管理员权限，请先登录' } }),
+        { status: 401, headers: { 'Content-Type': 'application/json' } },
+      ));
+    }
+    return realFetch9(input, init);
+  };
+  AD9.querySelector('#refresh-btn').dispatchEvent(new AW9.MouseEvent('click', { bubbles: true }));
+  for (let i = 0; i < 20; i += 1) {
+    if (!AW9.localStorage.getItem('lumina_token')) break;
+    await sleep(250);
+  }
+  assert(!AW9.localStorage.getItem('lumina_token'),
+    'H13 列表请求 401 后失效 Token 被统一封装清理（不再停留假死仪表盘）');
+  AW9.fetch = realFetch9;
+  AW9.close();
+
+  // 恢复游客上传
+  await fetch(`${BASE}/api/settings`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sec9Token}` },
+    body: JSON.stringify({ guest_upload_enabled: true }),
+  });
+  assert(true, '已恢复游客上传开关');
+
   /* ------------------------- 汇总 ------------------------- */
   console.log(`\n\x1b[1m检查结果\x1b[0m  通过 \x1b[32m${pass}\x1b[0m 项，失败 \x1b[31m${fail}\x1b[0m 项\n`);
   if (fail) {

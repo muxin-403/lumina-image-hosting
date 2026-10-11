@@ -32,7 +32,9 @@ function mapMulterError(err, ctx) {
     case 'LIMIT_FILE_COUNT':
       return new ApiError(413, `单次最多上传 ${ctx.maxFiles} 个文件`, 'TOO_MANY_FILES');
     case 'LIMIT_UNEXPECTED_FILE':
-      return new ApiError(400, `非预期的文件字段：${err.field}（请使用 file / files）`, 'UNEXPECTED_FIELD');
+      // 当前 multer 用 .any() 接收任意字段名（兼容既有调用方），
+      // 该分支为纵深防御兜底；提示语如实描述行为
+      return new ApiError(400, `未预期的文件字段：${err.field}（当前接受任意字段名，建议规范使用 file / files）`, 'UNEXPECTED_FIELD');
     default:
       return new ApiError(400, `文件接收失败：${err.message}`, 'UPLOAD_ERROR');
   }
@@ -49,6 +51,22 @@ function receiveFiles(opt = {}) {
       req.isAdmin ? settings.get('max_file_size') : settings.get('guest_max_file_size'),
     );
     const maxFiles = Math.max(1, Number(settings.get('max_files')) || 20);
+
+    // 请求级总量预检：单请求总字节上限 = 文件数上限 × 单文件上限 + 轻量 multipart 开销。
+    // 此前只有单文件限额（multer fileSize），游客 20×5MB=100MB/请求 全量缓冲内存，
+    // 少量并发即可打爆小内存主机。chunked（无 Content-Length）请求跳过预检，
+    // 仍由 multer 单文件限额兜底（残余风险已在 API 文档注明）。
+    const totalCap = maxFiles * maxSize + 16 * 1024;
+    const contentLength = Number(req.headers['content-length']);
+    if (Number.isFinite(contentLength) && contentLength > totalCap) {
+      return next(
+        new ApiError(
+          413,
+          `请求总量超过上限（一次最多 ${maxFiles} 个文件 × ${humanSize(maxSize)}），请分批上传`,
+          'PAYLOAD_TOO_LARGE',
+        ),
+      );
+    }
 
     const instance = multer({
       storage: memory,

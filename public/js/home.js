@@ -229,6 +229,7 @@
     if (file.type === 'image/gif' && await isAnimatedGif(file)) return { file, converted: false };
 
     let bitmap = null;
+    let canvas = null;
     try {
       bitmap = await createImageBitmap(file);
       const pixels = bitmap.width * bitmap.height;
@@ -238,7 +239,7 @@
         return { file, converted: false, pixels };
       }
 
-      const canvas = document.createElement('canvas');
+      canvas = document.createElement('canvas');
       canvas.width = bitmap.width;
       canvas.height = bitmap.height;
       const ctx = canvas.getContext('2d');
@@ -254,10 +255,6 @@
 
       const blob = await encodeWebp(canvas, effectiveQuality);
 
-      // 编码结果已拿到，立刻归还画布的 backing store（置 0 是各浏览器通用的释放手法）
-      canvas.width = 0;
-      canvas.height = 0;
-
       // toBlob 在 Safari 老版本会静默回退成 PNG，此时 blob.type 不是 webp
       if (!blob || blob.type !== 'image/webp') return { file, converted: false, pixels };
       if (blob.size >= file.size) return { file, converted: false, pixels }; // 没有收益就不转
@@ -271,7 +268,12 @@
     } catch (_) {
       return { file, converted: false };
     } finally {
-      // 所有返回路径统一在此归还位图内存（close 幂等，重复调用无副作用）
+      // 所有返回路径（含异常）统一归还位图与画布内存；
+      // 置 0 是各浏览器通用的 backing store 释放手法，与 close 一样幂等
+      if (canvas) {
+        canvas.width = 0;
+        canvas.height = 0;
+      }
       if (bitmap && bitmap.close) {
         try {
           bitmap.close();
@@ -856,7 +858,14 @@
 
       // 个别浏览器 / 测试环境不触发 upload 的 load 事件，这里兜底补上时间戳
       if (task.timings.uploadEnd === undefined) task.timings.uploadEnd = perfNow();
-      if (task.removed) return; // 响应与删除同时到达：由 removeTask 负责善后
+      if (task.removed) {
+        // 用户在「服务端处理中」点了取消但响应此刻到达：请求体已发完，
+        // 服务端必然已落库 —— 必须把响应记录下来供 removeTask 凭 delete_key
+        // 清理服务端资源；直接丢弃会在服务器留下无法删除的孤儿文件
+        const lateItems = Array.isArray(data) ? data : [data];
+        if (lateItems.length && lateItems[0] && lateItems[0].id) task.item = lateItems[0];
+        return; // 由 removeTask 负责善后
+      }
 
       task.uploadBytes = file.size;
       const items = Array.isArray(data) ? data : [data];
@@ -994,14 +1003,17 @@
     const wasDone = task.state === 'done';
 
     // ---- 1. 中断在途请求 / 清除待触发的自动重试，并阻止排队的 worker 继续处理它 ----
+    // 「服务端处理中」（请求体已发完）不能 abort：服务端会照常接收并落库，
+    // abort 只会让前端丢掉响应里的 delete_key，留下无法删除的孤儿文件。
+    // 此时保留 XHR 等响应到达，由第 2/3 步凭凭证清理服务端资源
     task.removed = true;
     clearRetryTimer(task);
-    if (task.xhr) {
+    if (task.xhr && task.state !== 'processing') {
       try {
         task.xhr.abort();
       } catch (_) { /* 请求可能刚好已结束 */ }
-      task.xhr = null;
     }
+    task.xhr = null;
 
     // ---- 2. 等这条任务的最终状态落定 ----
     // 上传完成与点击删除可能同时发生，必须等 processOne 把 item 写下来再决定是否删服务端资源
@@ -1026,7 +1038,9 @@
     syncListChrome();
 
     // ---- 6. 反馈 ----
-    if (!wasDone) {
+    if (!wasDone && cleanup.deleted) {
+      toast(`${task.name}：已取消并清理服务端文件`, 'success', 3000);
+    } else if (!wasDone) {
       toast(`${task.name}：已取消该上传任务`, 'info', 2400);
     } else if (cleanup.deleted) {
       toast(`${task.name}：已删除（含服务器上的原图与缩略图）`, 'success', 3000);
@@ -1081,8 +1095,10 @@
     const files = Array.from(fileList || []);
     if (!files.length) return;
 
-    if (!config.guest_upload_enabled) {
-      toast('当前仅管理员可上传', 'error');
+    // 游客上传关闭时仅拦截匿名用户：服务端对管理员始终放行
+    // （middleware/auth.js requireUploadPermission），本地已有管理员 Token 则放行
+    if (!config.guest_upload_enabled && !Lumina.store.get(Lumina.TOKEN_KEY)) {
+      toast('当前仅管理员可上传，请先在管理台登录', 'error');
       return;
     }
 

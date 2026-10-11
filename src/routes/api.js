@@ -6,7 +6,7 @@
 
 const express = require('express');
 const config = require('../config');
-const { Images } = require('../db');
+const { Images, count } = require('../db');
 const { settings } = require('../services/settings');
 const { storageManager } = require('../services/settings');
 const { ok } = require('../utils');
@@ -31,7 +31,9 @@ router.get(
       node: process.version,
       uptime_seconds: Math.round(process.uptime()),
       storage_driver: storage.name,
-      images: Images.stats().total,
+      // /health 是监控轮询的无鉴权端点，只取单条 COUNT；
+      // 此前调用完整 stats()（6 条查询含无索引 GROUP BY），同步阻塞事件循环
+      images: count(),
       time: new Date().toISOString(),
     });
   }),

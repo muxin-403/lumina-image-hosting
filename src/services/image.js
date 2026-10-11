@@ -33,7 +33,8 @@ const FORMAT_EXT = {
   webp: 'webp',
   avif: 'avif',
   svg: 'svg',
-  heif: 'avif',
+  // 注意：heif/heic 不映射为 avif —— 二者同容器（HEIF）不同编码（HEVC vs AV1），
+  // sharp 官方预编译二进制不支持 HEVC 解码，错标 avif 会让浏览器无法解码显示
 };
 
 const EXT_MIME = {
@@ -55,8 +56,6 @@ const MIME_EXT = {
   'image/gif': 'gif',
   'image/webp': 'webp',
   'image/avif': 'avif',
-  'image/heic': 'avif',
-  'image/heif': 'avif',
   'image/svg+xml': 'svg',
   'image/svg': 'svg',
 };
@@ -79,7 +78,8 @@ function sniffMagic(buffer) {
   if (buffer.subarray(4, 8).toString('ascii') === 'ftyp') {
     const brand = buffer.subarray(8, 12).toString('ascii');
     if (brand.startsWith('avif') || brand.startsWith('avis')) return 'avif';
-    if (brand.startsWith('heic') || brand.startsWith('mif1')) return 'avif'; // HEIC 交给 sharp 处理
+    // HEIC / 通用 HEIF 容器（iPhone 默认格式）：显式返回，由 probe 统一给出明确 415
+    if (brand.startsWith('heic') || brand.startsWith('mif1')) return 'heic';
   }
   const head = buffer.subarray(0, 512).toString('utf8').toLowerCase();
   if (head.includes('<svg')) return 'svg';
@@ -146,6 +146,18 @@ async function probe(buffer) {
 
   if (!format) {
     throw new ApiError(415, '无法识别的图片格式，仅支持 JPG / PNG / GIF / WebP / SVG / AVIF', 'UNSUPPORTED_FORMAT');
+  }
+
+  // HEIC/HEIF（iPhone 默认格式）明确拒绝：sharp 官方预编译不支持 HEVC 解码，
+  // 静默接受会产出「.avif 后缀 + HEIC 字节」的记录，直链在所有主流浏览器都无法显示。
+  // 注意：libvips 的 AVIF 同样走 heif 容器（meta.format 报告为 'heif'），
+  // 必须用 ftyp 品牌二次判别 —— 声明 avif/avis 品牌的是合法 AVIF，放行
+  if (format === 'heif' || format === 'heic') {
+    if (sniffMagic(buffer) === 'avif') {
+      format = 'avif';
+    } else {
+      throw new ApiError(415, 'HEIC/HEIF 暂不支持，请先转为 JPG / PNG / WebP 后上传', 'UNSUPPORTED_FORMAT');
+    }
   }
 
   const ext = FORMAT_EXT[format] || format;
@@ -234,10 +246,14 @@ async function convertAnimatedGifToWebp(raw, { quality }) {
 /** 生成缩略图（WebP，恒本地存储） */
 async function makeThumbnail(buffer, { ext, width }) {
   const target = Math.max(64, Number(width) || 480);
+  // 缩略图目标只有几百像素宽，却要先把整幅 SVG 栅格化：
+  // density 渲染会把画布按 ~2.78 倍放大，恶意/超大的 SVG 声明尺寸可放大出
+  // 数亿像素（数百 MB 内存/请求）。此处收紧像素上限，超限直接失败并回落原图。
+  const THUMB_PIXEL_LIMIT = 26840268; // ≈26MP，约 5000×5000 @ density 200
   try {
     if (ext === 'svg') {
       // 矢量图：提高渲染密度后再缩小，边缘更干净
-      return await sharp(buffer, { density: 200 })
+      return await sharp(buffer, { density: 200, limitInputPixels: THUMB_PIXEL_LIMIT })
         .resize({ width: target, withoutEnlargement: true })
         .webp({ quality: 82 })
         .toBuffer();
@@ -344,9 +360,11 @@ async function processImage(raw, opt) {
     note = optimized ? `已优化${resized ? '并缩放' : ''}` : '原始文件已是最优';
   }
 
-  // 处理后的实际尺寸（缩放会改变宽高）
+  // 处理后的实际尺寸：只要字节被重写（缩放 / EXIF 方向烘焙 / 动图转码）就读最终 buffer。
+  // 此前仅 resized 分支重读 —— 带 EXIF Orientation 的照片被 rotate() 烘焙方向后
+  // 像素宽高互换，落库的却是旋转前尺寸，详情页与列表横竖颠倒
   let { width, height } = info;
-  if (resized) {
+  if (finalBuffer !== raw) {
     try {
       const m = await sharp(finalBuffer, { failOn: 'none' }).metadata();
       width = m.width || width;

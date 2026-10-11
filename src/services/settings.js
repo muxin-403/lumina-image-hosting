@@ -37,6 +37,8 @@ const DEFAULTS = {
   webdav_password: config.webdav.password,
   webdav_directory: config.webdav.directory,
   webdav_public_url: config.webdav.publicUrl,
+  // 只读回落项：不入 PATCH 白名单（SCHEMA 无此键），仅让 .env 的 WEBDAV_TIMEOUT 生效
+  webdav_timeout: config.webdav.timeout,
 };
 
 /** 密码哈希：scrypt + 随机盐（Node 内置，无第三方依赖） */
