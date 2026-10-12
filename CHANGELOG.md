@@ -10,6 +10,12 @@
 
 ## [未发布]
 
+### 问题修复
+
+- **修复发版后管理台「半新半旧」导致整页瘫痪（v1.6.0 线上事故）**：本项目无构建步骤、静态文件名无内容 hash，此前 JS/CSS 按 `max-age=1h` 缓存而页面 HTML 按 `max-age=0` 协商——发版后最长 1 小时内浏览器会拿到「新 HTML + 旧 JS/CSS」，旧 `admin.js` 在新版页面里找不到已删除的 DOM（`#image-tbody` 为 null），`bindTableActions` 抛 TypeError 且 DOMContentLoaded 初始化链中断，页面只剩静态骨架。Cloudflare 的 Browser Cache TTL 又把源站 1h 覆盖放大到 4h，线上实际断了近 5 小时。
+  - 修复：HTML / JS / CSS 统一改为 `Cache-Control: no-cache` 协商缓存（`express.static` 按扩展名 setHeaders + 页面 `sendFile` 显式头），文件未变化时经 `Last-Modified` 协商返回 304，无构建场景下开销可忽略；图片直链 `/i/` `/t/` 的 immutable 长缓存不受影响（内容寻址路径，不经此配置）。
+  - 部署侧配套：Cloudflare 面板 Caching → Browser Cache TTL 建议改为「Respect Existing Headers」，否则源站缓存头会被面板设置覆盖。
+
 ## [1.6.0] - 2026-10-12
 
 ### 功能新增

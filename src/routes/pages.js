@@ -329,12 +329,16 @@ ${THEME_BOOTSTRAP}
 
 /* ---------------------------- 首页（产品介绍页） ---------------------------- */
 
-router.get(['/home', '/home/'], (_req, res) => res.sendFile(path.join(config.publicDir, 'home.html')));
+// 页面 HTML 统一 no-cache：无构建项目文件名无 hash，必须每次协商，
+// 否则发版后会出现「新 HTML + 旧 JS/CSS」的断层（v1.6.0 线上事故）
+const PAGE_CACHE = { headers: { 'Cache-Control': 'no-cache' } };
+
+router.get(['/home', '/home/'], (_req, res) => res.sendFile(path.join(config.publicDir, 'home.html'), PAGE_CACHE));
 
 /* ---------------------------- 管理台入口 ---------------------------- */
 
-router.get('/admin', (_req, res) => res.sendFile(path.join(config.publicDir, 'admin.html')));
-router.get('/admin/', (_req, res) => res.sendFile(path.join(config.publicDir, 'admin.html')));
+router.get('/admin', (_req, res) => res.sendFile(path.join(config.publicDir, 'admin.html'), PAGE_CACHE));
+router.get('/admin/', (_req, res) => res.sendFile(path.join(config.publicDir, 'admin.html'), PAGE_CACHE));
 
 /* ---------------------------- API 文档页 ---------------------------- */
 

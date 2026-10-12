@@ -9,6 +9,7 @@
  */
 
 const express = require('express');
+const path = require('path');
 const config = require('./config');
 const { authenticate } = require('./middleware/auth');
 const { apiLimiter } = require('./middleware/rateLimit');
@@ -45,10 +46,19 @@ function createApp() {
   // 图片资源与页面
   app.use(pagesRouter);
 
-  // 前端静态资源
+  // 前端静态资源。
+  // 缓存策略：HTML / JS / CSS 一律 no-cache（浏览器可存副本但每次必须带 ETag 协商，
+  // 未变化时 304，开销可忽略）。本项目无构建、文件名无内容 hash，若用长 max-age，
+  // 发版后必然出现「新 HTML + 旧 JS/CSS」的断层窗口（管理台初始化直接报错），
+  // 且源站的 max-age 会被 Cloudflare 的 Browser Cache TTL 覆盖放大——v1.6.0 上线时
+  // 线上就因此断了近 5 小时。图片直链 /i/ /t/ 的 immutable 长缓存走 pages.js，不受影响。
+  const NO_CACHE = 'no-cache';
   app.use(
     express.static(config.publicDir, {
-      maxAge: config.isProd ? '1h' : 0,
+      setHeaders(res, filePath) {
+        const ext = path.extname(filePath).toLowerCase();
+        if (ext === '.html' || ext === '.js' || ext === '.css') res.setHeader('Cache-Control', NO_CACHE);
+      },
       extensions: ['html'],
       index: 'index.html',
     }),
