@@ -5,8 +5,8 @@
 - 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 - 日期按东八区（UTC+8）计，条目按「版本 + 发布日期」倒序排列，最新版本在最前。
 - 变更类型固定为：功能新增 / 问题修复 / 优化调整 / 文档。
-- 版本号与 `package.json` 保持一致；镜像标签由 CI 依据 Git tag 生成（当前仓库尚未打 tag，
-  故下方链接暂以提交区间代替，打 tag 后可换成 `compare/v1.1.0...v1.2.0` 形式）。
+- 版本号与 `package.json` 保持一致；镜像标签由 CI 依据 Git tag 生成（`v1.6.0` → `:1.6.0` / `:1.6` / `:sha-xxxxxxx`，
+  `main` 分支 → `:main` / `:latest`）。
 
 ## [未发布]
 
