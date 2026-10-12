@@ -6,6 +6,16 @@
   <title>Lumina 图床 · 轻量级自托管图床</title>
   <meta name="description" content="Lumina —— 轻量级自托管图床：拖拽即上传，本地与 WebDAV 双存储，四种引用格式一键复制，完整 RESTful API。零前端构建，克隆即跑。" />
   <meta name="theme-color" content="#2f6feb" />
+  <script>
+    (function () {
+      try {
+        var pref = localStorage.getItem('lumina_theme');
+        var dark = pref === 'dark' || ((pref == null || pref === 'auto') &&
+          window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+      } catch (_) { /* ignore */ }
+    })();
+  </script>
   <meta property="og:title" content="Lumina 图床" />
   <meta property="og:description" content="轻量级自托管图床：拖拽即上传，本地 / WebDAV 双存储，完整 RESTful API。" />
   <meta property="og:type" content="website" />

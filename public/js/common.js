@@ -125,6 +125,124 @@ const Lumina = (() => {
     return done;
   }
 
+  /* ------------------------------ 明暗主题 ------------------------------ */
+
+  const THEME_KEY = 'lumina_theme'; // light | dark | auto（其余值一律视为 auto）
+  const THEME_BG = { light: '#f4f6fa', dark: '#0d1117' }; // 与 style.css 的 --bg 对应，用于 theme-color
+  const THEME_ICONS = {
+    auto: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>',
+    light: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+    dark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
+  };
+
+  function systemPrefersDark() {
+    try {
+      return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /** 把偏好档位解析为具体主题：手动 light/dark 原样返回，auto 跟随系统 */
+  function resolveTheme(pref) {
+    if (pref === 'light' || pref === 'dark') return pref;
+    return systemPrefersDark() ? 'dark' : 'light';
+  }
+
+  function getThemePref() {
+    const v = store.get(THEME_KEY);
+    return v === 'light' || v === 'dark' ? v : 'auto';
+  }
+
+  /** 把主题落到 <html data-theme="light|dark">，并同步浏览器地址栏配色（theme-color） */
+  function applyTheme(pref) {
+    const eff = resolveTheme(pref);
+    if (document.documentElement.dataset.theme !== eff) {
+      document.documentElement.dataset.theme = eff;
+    }
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', THEME_BG[eff]);
+    return eff;
+  }
+
+  function setThemePref(pref) {
+    store.set(THEME_KEY, pref === 'light' || pref === 'dark' ? pref : 'auto');
+    applyTheme(pref);
+    refreshThemeToggle();
+  }
+
+  // 「跟随系统」档位下，系统偏好变化实时生效（含旧 Safari 的 addListener 兼容）
+  try {
+    const mq = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)');
+    if (mq) {
+      const onSchemeChange = () => {
+        if (getThemePref() === 'auto') applyTheme('auto');
+      };
+      if (mq.addEventListener) mq.addEventListener('change', onSchemeChange);
+      else if (mq.addListener) mq.addListener(onSchemeChange);
+    }
+  } catch (_) { /* ignore */ }
+
+  // 本脚本在 body 末尾执行时 DOM 已就绪：立即落一次主题（幂等），
+  // 与各页面 <head> 的早期内联脚本结果一致，并兜底未加早期脚本的页面
+  applyTheme(getThemePref());
+
+  /** 同步顶栏切换入口的图标与选中态 */
+  function refreshThemeToggle() {
+    const details = document.querySelector('.theme-menu');
+    if (!details) return;
+    const pref = getThemePref();
+    const summary = details.querySelector('summary');
+    if (summary) summary.innerHTML = THEME_ICONS[resolveTheme(pref)];
+    details.querySelectorAll('button[data-pref]').forEach((b) => {
+      const active = b.dataset.pref === pref;
+      b.classList.toggle('active', active);
+      b.setAttribute('aria-checked', active ? 'true' : 'false');
+    });
+  }
+
+  /** 向顶栏注入主题切换入口（跟随系统 / 浅色 / 暗色），各页面无需重复写标记 */
+  function initThemeToggle() {
+    const nav = document.querySelector('.topnav');
+    if (!nav || nav.querySelector('.theme-menu')) return;
+
+    const details = document.createElement('details');
+    details.className = 'menu theme-menu';
+    details.innerHTML = `
+      <summary class="theme-toggle" title="切换明暗主题" aria-label="切换明暗主题"></summary>
+      <div class="menu-list" role="menu" aria-label="明暗主题">
+        <button type="button" role="menuitemradio" data-pref="auto">${THEME_ICONS.auto}<span>跟随系统</span><span class="tmark">✓</span></button>
+        <button type="button" role="menuitemradio" data-pref="light">${THEME_ICONS.light}<span>浅色</span><span class="tmark">✓</span></button>
+        <button type="button" role="menuitemradio" data-pref="dark">${THEME_ICONS.dark}<span>暗色</span><span class="tmark">✓</span></button>
+      </div>`;
+
+    details.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-pref]');
+      if (!btn) return;
+      e.preventDefault();
+      setThemePref(btn.dataset.pref);
+      details.removeAttribute('open');
+    });
+    details.addEventListener('toggle', refreshThemeToggle);
+
+    nav.appendChild(details);
+    refreshThemeToggle();
+  }
+
+  // 打开状态的 <details class="menu">：点击外部或按 Esc 时收起（主题菜单与「更多」菜单通用）
+  document.addEventListener('click', (e) => {
+    document.querySelectorAll('details.menu[open]').forEach((d) => {
+      if (!d.contains(e.target)) d.removeAttribute('open');
+    });
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      document.querySelectorAll('details.menu[open]').forEach((d) => d.removeAttribute('open'));
+    }
+  });
+
+  initThemeToggle();
+
   /* ------------------------------- 工具 ------------------------------- */
 
   function formatSize(bytes) {
@@ -184,5 +302,9 @@ const Lumina = (() => {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  return { store, request, toast, copy, copyWithToast, formatSize, formatTime, escapeHtml, applyFavicon, debounce, downloadText, TOKEN_KEY };
+  return {
+    store, request, toast, copy, copyWithToast, formatSize, formatTime, escapeHtml,
+    applyFavicon, debounce, downloadText, TOKEN_KEY,
+    theme: { get: getThemePref, set: setThemePref, apply: applyTheme, resolve: resolveTheme },
+  };
 })();

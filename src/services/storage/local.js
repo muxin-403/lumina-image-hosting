@@ -49,13 +49,23 @@ class LocalStorage {
   }
 
   async remove(key) {
-    try {
-      await fsp.unlink(this.resolve(key));
-      return true;
-    } catch (err) {
-      if (err.code === 'ENOENT') return false;
-      logger.warn('删除本地文件失败', { key, err: err.message });
-      return false;
+    const abs = this.resolve(key);
+    // Windows 下刚写入/刚被读取过的文件可能被 Defender、索引服务等短暂占用，
+    // unlink 会以 EBUSY / EPERM 失败（Linux CI 不会触发）。
+    // 短退避重试几次仍失败才如实上报 storage_removed:false，避免留下孤儿文件。
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await fsp.unlink(abs);
+        return true;
+      } catch (err) {
+        if (err.code === 'ENOENT') return false;
+        if ((err.code === 'EBUSY' || err.code === 'EPERM') && attempt < 4) {
+          await new Promise((resolve) => setTimeout(resolve, 60 * (attempt + 1)));
+          continue;
+        }
+        logger.warn('删除本地文件失败', { key, err: err.message });
+        return false;
+      }
     }
   }
 

@@ -6,6 +6,16 @@
   <title>Lumina 图床 · 拖拽即上传</title>
   <meta name="description" content="轻量级自托管图床：支持拖拽 / 批量 / 剪贴板粘贴上传，自动生成直链、HTML、Markdown、BBCode 引用，支持本地与 WebDAV 存储。" />
   <meta name="theme-color" content="#2f6feb" />
+  <script>
+    (function () {
+      try {
+        var pref = localStorage.getItem('lumina_theme');
+        var dark = pref === 'dark' || ((pref == null || pref === 'auto') &&
+          window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+      } catch (_) { /* ignore */ }
+    })();
+  </script>
   <meta property="og:title" content="Lumina 图床" />
   <meta property="og:description" content="拖进来就上传，一键拿到多种格式的图片直链。" />
   <meta property="og:type" content="website" />

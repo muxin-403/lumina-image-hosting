@@ -33,6 +33,22 @@ const ID_RE = /^[A-Za-z0-9_-]{4,64}$/;
 const IMMUTABLE = 'public, max-age=31536000, immutable';
 
 /**
+ * 明暗主题早期引导：在样式表生效前按「已保存偏好 > 系统偏好」落 <html data-theme>，
+ * 避免暗色用户首屏闪白。与 public/js/common.js 的主题管理器约定一致
+ * （localStorage 键 lumina_theme：light / dark / auto，缺省 auto）。
+ */
+const THEME_BOOTSTRAP = `<script>
+  (function () {
+    try {
+      var pref = localStorage.getItem('lumina_theme');
+      var dark = pref === 'dark' || ((pref == null || pref === 'auto') &&
+        window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    } catch (_) { /* ignore */ }
+  })();
+</script>`;
+
+/**
  * 把可读流安全地接到响应上。
  * ------------------------------------------------------------------
  * 必须用 pipeline（而非裸 pipe）：
@@ -262,8 +278,10 @@ router.get(
 <meta property="og:image" content="${esc(url)}" />
 <meta name="twitter:card" content="summary_large_image" />
 <link rel="icon" href="/favicon.ico" />
+${THEME_BOOTSTRAP}
 <style>
-  :root { color-scheme: light dark; }
+  :root { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
   * { box-sizing: border-box; }
   body { margin:0; min-height:100dvh; display:flex; flex-direction:column; align-items:center;
          justify-content:center; gap:20px; padding:28px 16px;
@@ -280,12 +298,12 @@ router.get(
   button, a.btn { padding:10px 14px; border-radius:9px; border:1px solid #d0d7de; background:#fff;
           color:inherit; font:inherit; cursor:pointer; text-decoration:none; }
   button.primary { background:#2f6feb; border-color:#2f6feb; color:#fff; }
-  @media (prefers-color-scheme: dark) {
-    body { background:#0d1117; color:#e6edf3; }
-    .card { background:#161b22; border-color:#30363d; }
-    .tag { background:#21262d; color:#8b949e; }
-    input, button, a.btn { background:#21262d; border-color:#30363d; color:#e6edf3; }
-  }
+  :root[data-theme="dark"] body { background:#0d1117; color:#e6edf3; }
+  :root[data-theme="dark"] .card { background:#161b22; border-color:#30363d; }
+  :root[data-theme="dark"] .tag { background:#21262d; color:#8b949e; }
+  :root[data-theme="dark"] input,
+  :root[data-theme="dark"] button, :root[data-theme="dark"] a.btn {
+    background:#21262d; border-color:#30363d; color:#e6edf3; }
 </style>
 </head>
 <body>
@@ -347,6 +365,7 @@ router.get(
 <title>API 文档 · Lumina 图床</title>
 <link rel="icon" href="/favicon.svg" />
 <link rel="stylesheet" href="/css/style.css" />
+${THEME_BOOTSTRAP}
 <style>
   .doc-layout { display:grid; grid-template-columns: 232px 1fr; gap:34px; align-items:start; }
   .doc-toc { position:sticky; top:82px; max-height:calc(100dvh - 110px); overflow:auto;
@@ -406,6 +425,7 @@ router.get(
     <article class="doc card section">${html}</article>
   </main>
   <footer class="foot">Lumina 图床 · 文档源：<code>docs/API.md</code></footer>
+  <script src="/js/common.js"></script>
 </body>
 </html>`);
   }),

@@ -175,11 +175,11 @@ image-hosting/
 │   ├── admin.html               管理台
 │   ├── 404.html
 │   ├── favicon.svg
-│   ├── css/style.css            样式表（自定义属性 + 亮/暗色自适应 + 响应式）
+│   ├── css/style.css            样式表（自定义属性 + 明暗主题手动/跟随系统 + 响应式）
 │   └── js/
-│       ├── common.js            请求封装、Toast、剪贴板（含 execCommand 回退）
+│       ├── common.js            请求封装、Toast、剪贴板（含 execCommand 回退）、主题管理器
 │       ├── home.js              拖拽/批量/粘贴上传、客户端 WebP、多格式复制
-│       └── admin.js             登录、统计、列表筛选删除、配置表单、存储自检
+│       └── admin.js             登录、统计、瀑布流列表、右键菜单、配置表单、存储自检
 │
 ├── docs/
 │   └── API.md                   API 文档唯一源（站点 /api-docs 实时渲染）
@@ -561,7 +561,7 @@ curl -X PATCH http://localhost:3000/api/settings -H "Authorization: Bearer $TOKE
   - 模拟浏览器完全不支持 `createImageBitmap` 时，勾选该选项会被**自动取消并提示**，
     而不是静默失败
 - 管理台：未登录显示登录表单；填入密码提交后切换到控制台、显示 4 张统计卡片
-  （数值来自接口）、图片列表渲染出数据行（含缩略图 / 复制 / 删除按钮）、
+  （数值来自接口）、图片列表渲染出瀑布流卡片（含缩略图 / 复制 / 删除按钮）、
   分页信息、格式下拉框按统计动态填充、勾选后出现批量操作栏
 - 配置表单：站点名 / 游客上限（按 MB 回填）/ 格式串 / 各开关全部正确回填；
   WebDAV 密码**不回显明文**；通过界面提交 5MB → 6MB，

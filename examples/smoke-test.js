@@ -359,7 +359,8 @@ async function main() {
   const batch = await api('/api/images/batch-delete', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ids: [png.id, svg.id, gif.id].filter(Boolean) }),
+    // 上传条目可能因秒传 / 转码在 find 时缺席（filter 容忍缺项），这里统一先过滤再取 id
+    body: JSON.stringify({ ids: [png, svg, gif].filter(Boolean).map((c) => c.id) }),
   });
   assert(batch.status === 200 && batch.body.data.deleted.length >= 1, '批量删除接口正常',
     `已删除 ${batch.body.data.deleted.length} 张`);

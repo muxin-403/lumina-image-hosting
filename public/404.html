@@ -4,6 +4,16 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>404 · 页面不存在</title>
+  <script>
+    (function () {
+      try {
+        var pref = localStorage.getItem('lumina_theme');
+        var dark = pref === 'dark' || ((pref == null || pref === 'auto') &&
+          window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+      } catch (_) { /* ignore */ }
+    })();
+  </script>
   <link rel="icon" href="/favicon.ico" />
   <link rel="stylesheet" href="/css/style.css" />
 </head>
@@ -26,5 +36,6 @@
       <a class="btn primary" href="/">返回上传页</a>
     </div>
   </main>
+  <script src="/js/common.js"></script>
 </body>
 </html>

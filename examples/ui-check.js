@@ -342,10 +342,10 @@ async function main() {
   assert(/\d/.test(AD.querySelector('#stats .value').textContent),
     '统计数值已从接口填充', AD.querySelector('#stats .value').textContent);
 
-  // 列表表格
-  const rows = AD.querySelectorAll('#image-tbody tr');
-  const realRows = [...rows].filter((r) => r.querySelector('input.row-select'));
-  assert(realRows.length > 0, '图片列表渲染出数据行', `${realRows.length} 行`);
+  // 图片瀑布流卡片
+  const gridCards = AD.querySelectorAll('#image-grid .img-card');
+  const realRows = [...gridCards].filter((c) => c.querySelector('input.row-select'));
+  assert(realRows.length > 0, '图片列表渲染出瀑布流卡片', `${realRows.length} 张`);
   assert(AD.querySelector('#page-info').textContent.includes('共'),
     '分页信息已渲染', AD.querySelector('#page-info').textContent.trim());
   assert(AD.querySelector('#filter-ext').querySelectorAll('option').length > 1,
@@ -353,9 +353,9 @@ async function main() {
 
   if (realRows.length) {
     const first = realRows[0];
-    assert(first.querySelector('img') !== null, '列表行显示缩略图');
-    assert(first.querySelector('button[data-act="delete"]') !== null, '列表行提供删除按钮');
-    assert(first.querySelector('button[data-act="copy"]') !== null, '列表行提供复制链接按钮');
+    assert(first.querySelector('img') !== null, '瀑布流卡片显示缩略图');
+    assert(first.querySelector('button[data-act="delete"]') !== null, '瀑布流卡片提供删除按钮');
+    assert(first.querySelector('button[data-act="copy"]') !== null, '瀑布流卡片提供复制链接按钮');
   }
 
   // 勾选后批量操作栏出现
@@ -370,7 +370,7 @@ async function main() {
   // 标签页切换
   section('5. 管理台配置表单');
 
-  AD.querySelector('.tabs-nav button[data-tab="settings"]').dispatchEvent(
+  AD.querySelector('.side-nav button[data-tab="settings"]').dispatchEvent(
     new AW.Event('click', { bubbles: true }),
   );
   await sleep(900);
@@ -423,7 +423,7 @@ async function main() {
   ok('配置已还原为 5MB');
 
   // 存储自检
-  AD.querySelector('.tabs-nav button[data-tab="storage"]').dispatchEvent(
+  AD.querySelector('.side-nav button[data-tab="storage"]').dispatchEvent(
     new AW.Event('click', { bubbles: true }),
   );
   await sleep(900);
